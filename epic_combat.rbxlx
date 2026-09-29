@@ -6981,7 +6981,7 @@ local function setupRemotes()
 				Hud.hitmarker(info.crit, info.killed)
 				Hud.combo(State.combo)
 				Float.show(info.pos or (root and root.Position + Vector3.new(0, 3, 0)) or Vector3.new(0, 5, 0),
-					dmg, { crit = info.crit, killed = info.killed })
+					dmg, { crit = info.crit, kill = info.killed })
 				if info.crit then
 					Camera.punch(1.5)
 				end
