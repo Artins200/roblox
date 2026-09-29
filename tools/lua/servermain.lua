@@ -1,437 +1,404 @@
 --[[
-	CombatServer — вся боевая логика (серверная, авторитетная часть).
+	CombatServer — серверная часть боя.
 
-	Сервер проверяет откаты, энергию и заряд ульты, наносит урон, раскидывает
-	бойцов, запускает эффекты (VFX), ведёт leaderstats и статистику, управляет
-	нокдаунами, возвращает упавших на арену и обслуживает манекены.
+	* держит состояние бойцов (энергия, шкала ульты, полёт);
+	* обрабатывает 4 атаки: комбо ударов, пинок, лазер, ульту;
+	* считает урон по манекенам и игрокам, рассылает эффекты и звуки;
+	* следит за регенерацией, возвратом упавших и таблицей лидеров арены.
 
-	Клиент только присылает «намерения» (Attack) — всё остальное решает сервер.
+	Манекены — просто белые болванчики: они ничего не делают и не умирают.
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Debris = game:GetService("Debris")
-local TweenService = game:GetService("TweenService")
 
 local RS = game:GetService("ReplicatedStorage")
+local SSS = script.Parent
+
 local Config = require(RS:WaitForChild("CombatConfig"))
-local Vfx = require(script.Parent:WaitForChild("CombatVfx"))
-local Dummies = require(script.Parent:WaitForChild("CombatDummies"))
+local Vfx = require(SSS:WaitForChild("CombatVfx"))
+local Dummies = require(SSS:WaitForChild("CombatDummies"))
 
 local remotes
-local state = {}      -- [player] = состояние бойца
-local spawnPad        -- куда возвращать упавших
+local state = {}
 
-local ULTMAX = Config.Ult.max
-
--- ---------------------------------------------------------------------------
--- Утилиты
--- ---------------------------------------------------------------------------
 local function now()
 	return os.clock()
 end
 
+local function stOf(player)
+	local s = state[player]
+	if not s then
+		s = {
+			comboIndex = 0, comboT = 0,
+			energy = Config.Energy.max, ult = 0,
+			ultActive = false, flying = false, boosting = false,
+			lastDamage = -999, invulnUntil = 0,
+			damage = 0, maxHit = 0, kos = 0, bestCombo = 0, combo = 0,
+		}
+		state[player] = s
+	end
+	return s
+end
+
 local function getRoot(char)
-	return char and char:FindFirstChild("HumanoidRootPart")
+	if not char then
+		return nil
+	end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		return root
+	end
+	return nil
 end
 
 local function getHum(char)
-	return char and char:FindFirstChildOfClass("Humanoid")
-end
-
-local function st(player)
-	return state[player]
-end
-
-local function syncStats(player)
-	local s = st(player)
-	if not s then
-		return
-	end
-	local cs = player:FindFirstChild("CombatStats")
-	if not cs then
-		return
-	end
-	local e = cs:FindFirstChild("Energy")
-	local u = cs:FindFirstChild("Ult")
-	if e and math.abs(e.Value - s.energy) >= 1 then
-		e.Value = math.floor(s.energy)
-	end
-	if u and math.abs(u.Value - s.ult) >= 1 then
-		u.Value = math.floor(s.ult)
-	end
-end
-
-local function broadcastAction(char, name, data, auth)
 	if not char then
-		return
+		return nil
 	end
-	data = data or {}
-	if auth then
-		data.auth = true
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum and hum.Health > 0 then
+		return hum
 	end
-	remotes.Action:FireAllClients(char, name, data)
+	return nil
 end
 
-local function sfxAll(name, position, volume, pitch)
-	remotes.Sfx:FireAllClients(name, position, volume, pitch)
-end
-
-local function deny(player, action, reason)
-	remotes.Ack:FireClient(player, "denied", action, reason)
-end
-
--- Проверка отката и трата энергии. Возвращает true, если действие разрешено.
-local function spend(player, action, opts)
-	opts = opts or {}
-	local s = st(player)
-	if not s then
-		return false
-	end
-	local def = Config.Abilities[action]
-	if not def then
-		return true
-	end
-	local t = now()
-	if (s.cds[action] or 0) > t then
-		deny(player, action, "cooldown")
-		return false
-	end
-	if not opts.freeEnergy and def.energy > 0 then
-		if s.energy < def.energy then
-			deny(player, action, "energy")
-			return false
-		end
-		s.energy = s.energy - def.energy
-		s.lastEnergySpend = t
-		syncStats(player)
-	end
-	if def.cooldown > 0 then
-		s.cds[action] = t + def.cooldown
-	end
-	return true
-end
-
-local function addUlt(player, amount)
-	local s = st(player)
-	if not s or s.ultRun then
-		return
-	end
-	s.ult = math.clamp(s.ult + amount, 0, ULTMAX)
-	syncStats(player)
-	if s.ult >= ULTMAX and not s.ultReadySent then
-		s.ultReadySent = true
-		sfxAll("ready", getRoot(player.Character) and getRoot(player.Character).Position or Vector3.new(), 0.7)
-	end
-end
-
--- Направление «куда смотрит» атакующий (клиент присылает вектор, проверяем его)
-local function safeDir(char, data)
-	local root = getRoot(char)
-	local fallback = root and root.CFrame.LookVector or Vector3.new(0, 0, -1)
-	local d = data and data.look
-	if typeof(d) ~= "Vector3" then
-		return Vector3.new(fallback.X, 0, fallback.Z).Unit
-	end
-	if d.Magnitude < 0.01 then
-		return fallback
-	end
-	d = d.Unit
-	return d
+local function isDummy(model)
+	return model ~= nil and model:GetAttribute("Dummy") == true
 end
 
 -- ---------------------------------------------------------------------------
--- Поиск целей
+-- Статы игрока (клиент читает их для HUD)
 -- ---------------------------------------------------------------------------
-local function fxFolders()
-	local list = {}
-	for _, name in ipairs({ "CombatFX", "CombatFloaters", "LocalCombatFx" }) do
-		local f = workspace:FindFirstChild(name)
-		if f then
-			list[#list + 1] = f
+local function statValue(player, name, default)
+	local folder = player:FindFirstChild("CombatStats")
+	if not folder then
+		return default
+	end
+	local v = folder:FindFirstChild(name)
+	if v and v:IsA("NumberValue") then
+		return v.Value
+	end
+	return default
+end
+
+local function setStat(player, name, value)
+	local folder = player:FindFirstChild("CombatStats")
+	if not folder then
+		return
+	end
+	local v = folder:FindFirstChild(name)
+	if v and v:IsA("NumberValue") and v.Value ~= value then
+		v.Value = value
+	end
+end
+
+local function setupPlayer(player)
+	local stats = player:FindFirstChild("CombatStats")
+	if not stats then
+		stats = Instance.new("Folder")
+		stats.Name = "CombatStats"
+		stats.Parent = player
+		local function num(name, value)
+			local v = Instance.new("NumberValue")
+			v.Name = name
+			v.Value = value
+			v.Parent = stats
 		end
+		num("Energy", Config.Energy.max)
+		num("Ult", 0)
+		num("Damage", 0)
+		num("MaxHit", 0)
+		num("KOs", 0)
 	end
-	return list
+	local board = player:FindFirstChild("leaderstats")
+	if not board then
+		board = Instance.new("Folder")
+		board.Name = "leaderstats"
+		board.Parent = player
+		local dmg = Instance.new("IntValue")
+		dmg.Name = "Урон"
+		dmg.Value = 0
+		dmg.Parent = board
+		local ko = Instance.new("IntValue")
+		ko.Name = "КО"
+		ko.Value = 0
+		ko.Parent = board
+	end
+	stOf(player)
 end
 
-local function overlapParams(exclude)
-	local op = OverlapParams.new()
-	op.FilterType = Enum.RaycastFilterType.Exclude
-	local list = fxFolders()
-	if exclude then
-		list[#list + 1] = exclude
-	end
-	op.FilterDescendantsInstances = list
-	op.MaxParts = 60
-	return op
-end
-
--- Находит живые цели в «капсуле» перед бойцом
-local function findTargets(attackerChar, origin, dir, reach, radius, maxCount)
-	local look = origin + dir * reach
-	if (look - origin).Magnitude < 0.1 then
-		look = origin + Vector3.new(0, 0, -1) * reach
-	end
-	local cf = CFrame.lookAt(origin + dir * (reach * 0.5), look)
-	local size = Vector3.new(radius * 2, radius * 2.2, reach + radius)
-	local parts = workspace:GetPartBoundsInBox(cf, size, overlapParams(attackerChar))
-	local seen = {}
+-- ---------------------------------------------------------------------------
+-- Поиск целей (простой и надёжный: скан манекенов и игроков)
+-- ---------------------------------------------------------------------------
+local function findTargets(attacker, origin, dir, reach, radius)
 	local out = {}
-	for _, part in ipairs(parts) do
-		local model = part:FindFirstAncestorOfClass("Model")
-		if model and not seen[model] and model ~= attackerChar then
-			local hum = getHum(model)
-			if hum and hum.Health > 0 then
-				seen[model] = true
-				local r = getRoot(model)
-				local pos = r and r.Position or part.Position
-				out[#out + 1] = { model = model, hum = hum, root = r, pos = pos, dist = (pos - origin).Magnitude }
+	local flatDir = Vector3.new(dir.X, dir.Y, dir.Z)
+	if flatDir.Magnitude < 0.001 then
+		flatDir = Vector3.new(0, 0, -1)
+	end
+	flatDir = flatDir.Unit
+
+	local function consider(model, hum, root)
+		if not root or not hum or model == attacker then
+			return
+		end
+		local to = root.Position - origin
+		local along = to:Dot(flatDir)
+		if along < -3 or along > reach then
+			return
+		end
+		local perp = to - flatDir * along
+		local hitRadius = radius + math.max(root.Size.X, root.Size.Z) * 0.5
+		if perp.Magnitude > hitRadius then
+			return
+		end
+		out[#out + 1] = { model = model, hum = hum, root = root, pos = root.Position, along = along }
+	end
+
+	for _, pl in ipairs(Players:GetPlayers()) do
+		local ch = pl.Character
+		if ch then
+			consider(ch, getHum(ch), getRoot(ch))
+		end
+	end
+	local folder = Dummies.folder
+	if folder then
+		for _, m in ipairs(folder:GetChildren()) do
+			if m:IsA("Model") then
+				consider(m, m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart"))
 			end
 		end
 	end
 	table.sort(out, function(a, b)
-		return a.dist < b.dist
+		return a.along < b.along
 	end)
-	if maxCount and #out > maxCount then
-		local cut = {}
-		for i = 1, maxCount do
-			cut[i] = out[i]
-		end
-		return cut
-	end
 	return out
 end
 
-local function rayHit(attackerChar, origin, dir, range)
-	local rp = RaycastParams.new()
-	rp.FilterType = Enum.RaycastFilterType.Exclude
-	local list = fxFolders()
-	list[#list + 1] = attackerChar
-	rp.FilterDescendantsInstances = list
-	rp.IgnoreWater = true
-	return workspace:Raycast(origin, dir.Unit * range, rp)
+local function findInRadius(center, radius, exceptModel)
+	local out = {}
+	local function consider(model, hum, root)
+		if not root or not hum or model == exceptModel then
+			return
+		end
+		if (root.Position - center).Magnitude <= radius then
+			out[#out + 1] = { model = model, hum = hum, root = root, pos = root.Position }
+		end
+	end
+	for _, pl in ipairs(Players:GetPlayers()) do
+		local ch = pl.Character
+		if ch then
+			consider(ch, getHum(ch), getRoot(ch))
+		end
+	end
+	local folder = Dummies.folder
+	if folder then
+		for _, m in ipairs(folder:GetChildren()) do
+			if m:IsA("Model") then
+				consider(m, m:FindFirstChildOfClass("Humanoid"), m:FindFirstChild("HumanoidRootPart"))
+			end
+		end
+	end
+	return out
 end
 
 -- ---------------------------------------------------------------------------
 -- Урон
 -- ---------------------------------------------------------------------------
-local KO_ATTR = "KO"
-local LAST_ATTACKER = "LastAttacker"
-
-local function knockTarget(targetModel, dir, power, up, stun)
-	local player = Players:GetPlayerFromCharacter(targetModel)
-	if player then
-		remotes.Knock:FireClient(player, {
-			dir = Vector3.new(dir.X, 0, dir.Z),
-			power = power,
-			up = up,
-			stun = stun,
-		})
-	else
-		local root = getRoot(targetModel)
-		if root then
-			local v = root.AssemblyLinearVelocity
-			root.AssemblyLinearVelocity = Vector3.new(
-				v.X + dir.X * power, math.max(v.Y, 0) + up, v.Z + dir.Z * power)
-		end
-	end
+local function ownerOf(model)
+	return Players:GetPlayerFromCharacter(model)
 end
 
-local function applyDamage(attacker, targetModel, hum, amount, opts)
+local function applyDamage(attacker, victimModel, victimHum, victimRoot, amount, opts)
 	opts = opts or {}
-	if not hum or hum.Health <= 0 or not targetModel.Parent then
-		return 0
+	if not victimHum or victimHum.Health <= 0 then
+		return false
 	end
-	local s = st(attacker)
-	local targetPlayer = Players:GetPlayerFromCharacter(targetModel)
-
-	-- блок цели
-	local blocked = false
-	if targetPlayer then
-		local ts = st(targetPlayer)
-		if ts and ts.blocking then
-			blocked = true
-		end
-		-- неуязвимость во время рывка
-		if ts and (ts.invulnUntil or 0) > now() then
-			return 0
+	local victimPlayer = ownerOf(victimModel)
+	if victimPlayer then
+		local vs = stOf(victimPlayer)
+		if now() < (vs.invulnUntil or 0) then
+			return false
 		end
 	end
 
-	local crit = (not opts.noCrit) and math.random() < Config.Crit.chance
-	local final = amount
-	if blocked then
-		final = final * 0.25
-	end
+	local crit = math.random() < Config.Crit.chance
+	local dmg = amount
 	if crit then
-		final = final * Config.Crit.mult
+		dmg = math.floor(dmg * Config.Crit.mult)
 	end
-	final = math.floor(final + 0.5)
+	dmg = math.floor(dmg * (0.92 + math.random() * 0.16))
+	if dmg < 1 then
+		dmg = 1
+	end
 
-	local before = hum.Health
-	hum:TakeDamage(final)
-	local dealt = math.max(0, before - hum.Health)
-	local killed = hum.Health <= 0
+	local dummy = isDummy(victimModel)
+	if dummy then
+		-- манекен не умирает: просто держим полную жизнь
+		victimHum.Health = victimHum.MaxHealth
+	else
+		victimHum:TakeDamage(dmg)
+	end
 
-	local root = getRoot(targetModel) or hum.Parent.PrimaryPart
-	local hitPos = opts.pos or (root and root.CFrame.Position + Vector3.new(0, 0.5, 0)) or Vector3.new()
-	local dir = opts.dir or Vector3.new(0, 1, 0)
+	-- импульс
+	if victimRoot and not dummy then
+		local push = opts.dir or Vector3.new(0, 0, 0)
+		push = Vector3.new(push.X, 0, push.Z)
+		if push.Magnitude > 0.001 then
+			push = push.Unit
+		else
+			push = Vector3.new(0, 0, 0)
+		end
+		local kn = (opts.knock or 0) / math.max(victimRoot.AssemblyMass, 1)
+		local up = (opts.up or 0) / math.max(victimRoot.AssemblyMass, 1)
+		victimRoot.AssemblyLinearVelocity = victimRoot.AssemblyLinearVelocity
+			+ push * kn + Vector3.new(0, up, 0)
+	elseif victimRoot and dummy and opts.knock and opts.knock > 0 then
+		local push = opts.dir or Vector3.new(0, 0, 0)
+		victimRoot.AssemblyLinearVelocity = victimRoot.AssemblyLinearVelocity
+			+ Vector3.new(push.X, 0, push.Z) * Config.Dummy.hitPush * (opts.knock / 60)
+	end
 
 	-- эффекты попадания
-	Vfx.impact(hitPos, Config.Colors.hit, opts.fxScale or 4, 0.26)
-	Vfx.sparks(hitPos, dir, opts.sparks or 8, Config.Colors.hit, 26, 0.4, 0.4)
-	if crit or (opts.fxScale or 0) >= 8 then
-		Vfx.ring(hitPos, Config.Colors.ultHot, 1.2, 9, 0.35, true, 0.3)
-	end
-	sfxAll((opts.heavy and "hitHeavy") or "hit", hitPos, 1, 0.95 + math.random() * 0.2)
-
-	-- отдача
-	if opts.knock and opts.knock > 0 then
-		knockTarget(targetModel, dir, opts.knock, opts.up or 0, opts.heavy)
+	local pos = victimRoot and victimRoot.Position or (opts.pos or Vector3.new(0, 0, 0))
+	local scale = opts.fxScale or 4
+	local color = (opts.heavy and Config.Colors.ultHot) or Config.Colors.hit
+	Vfx.impact(pos + Vector3.new(0, 0.4, 0), color, scale * 0.5, 0.35)
+	Vfx.sparks(pos, opts.dir or Vector3.new(0, 1, 0), opts.heavy and 10 or 5, color, 26, 0.4, 0.35)
+	if opts.heavy then
+		Vfx.ring(pos, Config.Colors.plasmaHot, 1.2, 9, 0.4, false, 0.45)
+		Vfx.shockwave(pos - Vector3.new(0, 2.6, 0), color, 14, 0.5)
 	end
 
-	-- анимация реакции цели
-	local local_dir = dir
-	local troot = getRoot(targetModel)
-	if troot then
-		local_dir = troot.CFrame:VectorToObjectSpace(dir)
-	end
-	broadcastAction(targetModel, "hit", { dir = local_dir, power = opts.power or 1 })
+	-- вспышка у жертвы + звук всем
+	remotes.Action:FireAllClients(victimModel, "hit", {
+		dir = opts.dir or Vector3.new(0, 0, -1),
+		power = math.clamp((opts.power or 1) * 0.6, 0.4, 1.6),
+	})
+	remotes.Sfx:FireAllClients(opts.heavy and "hitHeavy" or "hit", pos, 1, 0.9 + math.random() * 0.25)
+	Vfx.flash(pos, color, 1.6, 12, 0.2)
 
-	-- уведомления
-	if targetPlayer then
-		remotes.Hurt:FireClient(targetPlayer, {
-			damage = dealt,
-			blocked = blocked,
-			from = hitPos,
-			crit = crit,
-		})
-	else
-		hum:SetAttribute("LastHit", now())
-	end
-
-	if s then
-		remotes.Feedback:FireClient(attacker, {
-			kind = "hit",
-			damage = dealt,
-			pos = hitPos,
-			crit = crit,
-			killed = killed,
-			target = targetModel.Name,
-		})
-		s.damageDealt = s.damageDealt + dealt
-		addUlt(attacker, dealt * Config.Ult.perDamageDealt + (opts.ultBonus or 0))
-		-- статистика комбо
-		if now() - (s.lastHit or 0) < 2.5 then
-			s.hitStreak = (s.hitStreak or 0) + 1
-		else
-			s.hitStreak = 1
-		end
-		s.lastHit = now()
-		local ls = attacker:FindFirstChild("leaderstats")
-		if ls then
-			local dmgStat = ls:FindFirstChild("Урон")
-			if dmgStat then
-				dmgStat.Value = s.damageDealt
+	-- уведомление атакующему
+	if attacker then
+		local aplayer = ownerOf(attacker)
+		if aplayer then
+			local as = stOf(aplayer)
+			as.damage = as.damage + dmg
+			if dmg > as.maxHit then
+				as.maxHit = dmg
 			end
-			local comboStat = ls:FindFirstChild("Комбо")
-			if comboStat and s.hitStreak > comboStat.Value then
-				comboStat.Value = s.hitStreak
+			as.combo = as.combo + 1
+			if as.combo > as.bestCombo then
+				as.bestCombo = as.combo
 			end
+			as.ult = math.min(Config.Ult.max, as.ult + dmg * Config.Ult.perDamageDealt * (opts.ultBonus or 1))
+			setStat(aplayer, "Damage", as.damage)
+			setStat(aplayer, "MaxHit", as.maxHit)
+			local killed = (not dummy) and victimHum.Health <= 0
+			if killed then
+				as.kos = as.kos + 1
+				setStat(aplayer, "KOs", as.kos)
+			end
+			remotes.Feedback:FireClient(aplayer, {
+				kind = "hit", damage = dmg, crit = crit, killed = killed,
+				target = victimModel.Name, pos = pos,
+			})
 		end
 	end
 
-	if targetPlayer then
-		local ts = st(targetPlayer)
-		if ts then
-			ts.lastDamage = now()
-			addUlt(targetPlayer, dealt * Config.Ult.perDamageTaken)
+	-- ульта жертвы копится от полученного урона
+	if victimPlayer then
+		local vs = stOf(victimPlayer)
+		vs.ult = math.min(Config.Ult.max, vs.ult + dmg * Config.Ult.perDamageTaken)
+		vs.lastDamage = now()
+		remotes.Hurt:FireClient(victimPlayer, { damage = dmg })
+		if dummy then
+			victimHum.Health = victimHum.MaxHealth
 		end
 	end
-
-	if killed then
-		hum:SetAttribute(LAST_ATTACKER, attacker.Name)
-		local ls = attacker:FindFirstChild("leaderstats")
-		if ls then
-			local ko = ls:FindFirstChild("КО")
-			if ko then
-				ko.Value = ko.Value + 1
-			end
-		end
-		if s then
-			s.kills = (s.kills or 0) + 1
-		end
-		sfxAll("boom", hitPos, 1, 1)
-	end
-	return dealt
+	return true
 end
 
--- Урон по области
-local function damageArea(attacker, center, radius, amount, opts)
+-- Луч: урон по всем, кто стоит в коридоре
+local function damageBeam(attacker, origin, dir, range, radius, damage, opts)
 	opts = opts or {}
-	local found = workspace:GetPartBoundsInBox(
-		CFrame.new(center), Vector3.new(radius * 2, radius * 2, radius * 2), overlapParams(attacker.Character))
-	local seen = {}
-	for _, part in ipairs(found) do
-		local model = part:FindFirstAncestorOfClass("Model")
-		if model and not seen[model] and (not attacker.Character or model ~= attacker.Character) then
-			seen[model] = true
-			local hum = getHum(model)
-			if hum and hum.Health > 0 then
-				local root = getRoot(model)
-				local pos = (root and root.Position or part.Position)
-				local dir = (pos - center)
-				if dir.Magnitude < 0.5 then
-					dir = Vector3.new(0, 1, 0)
-				end
-				opts.pos = pos
-				opts.dir = Vector3.new(dir.X, 0, dir.Z).Unit
-				applyDamage(attacker, model, hum, amount, opts)
+	local hitAny = false
+	local step = radius * 0.8
+	local d = 0
+	while d <= range do
+		local center = origin + dir * d
+		local list = findInRadius(center, radius, attacker)
+		for i = 1, #list do
+			local t = list[i]
+			if not t.marked then
+				t.marked = true
+				hitAny = applyDamage(attacker, t.model, t.hum, t.root, damage, {
+					dir = dir,
+					knock = opts.knock or 60,
+					up = opts.up or 12,
+					power = opts.power or 1.6,
+					heavy = true,
+					fxScale = opts.fxScale or 8,
+				}) or hitAny
 			end
 		end
+		d = d + step
 	end
+	return hitAny
 end
 
--- Урон по «коридору» (для луча ульты)
-local function damageBeam(attacker, origin, dir, range, radius, amount, opts)
-	opts = opts or {}
-	local hits = 0
-	local targets = {}
-	for _, pl in ipairs(Players:GetPlayers()) do
-		if pl.Character and pl.Character ~= attacker.Character then
-			local hum = getHum(pl.Character)
-			if hum and hum.Health > 0 then
-				targets[#targets + 1] = pl.Character
-			end
-		end
+-- ---------------------------------------------------------------------------
+-- Рассылка анимаций
+-- ---------------------------------------------------------------------------
+local function broadcast(char, name, data, caster)
+	data = data or {}
+	if caster then
+		data.auth = true
 	end
-	local dummies = workspace:FindFirstChild("CombatDummies")
-	if dummies then
-		for _, model in ipairs(dummies:GetChildren()) do
-			local hum = getHum(model)
-			if hum and hum.Health > 0 then
-				targets[#targets + 1] = model
-			end
-		end
+	remotes.Action:FireAllClients(char, name, data)
+end
+
+local function sfxAll(name, pos, vol, pitch)
+	remotes.Sfx:FireAllClients(name, pos, vol or 1, pitch or 1)
+end
+
+-- ---------------------------------------------------------------------------
+-- Энергия и кулдауны
+-- ---------------------------------------------------------------------------
+local function spend(player, id)
+	local def = Config.Abilities[id]
+	if not def then
+		return false
 	end
-	for _, model in ipairs(targets) do
-		local root = getRoot(model)
-		local hum = getHum(model)
-		if root and hum and hum.Health > 0 then
-			local rel = root.Position - origin
-			local along = rel:Dot(dir)
-			if along > 0 and along < range then
-				local perp = (rel - dir * along).Magnitude
-				if perp < radius then
-					opts.pos = root.Position
-					opts.dir = dir
-					applyDamage(attacker, model, hum, amount, opts)
-					hits = hits + 1
-				end
-			end
-		end
+	local s = stOf(player)
+	if def.energy > 0 and s.energy < def.energy then
+		remotes.Ack:FireClient(player, "denied", { action = id, reason = "energy" })
+		return false
 	end
-	return hits
+	if def.energy > 0 then
+		s.energy = s.energy - def.energy
+		setStat(player, "Energy", math.floor(s.energy))
+	end
+	return true
+end
+
+local function safeDir(char, data)
+	local root = getRoot(char)
+	local dir
+	if data and typeof(data.look) == "Vector3" then
+		dir = data.look
+	elseif root then
+		dir = root.CFrame.LookVector
+	end
+	if not dir then
+		dir = Vector3.new(0, 0, -1)
+	end
+	if dir.Magnitude < 0.001 then
+		dir = Vector3.new(0, 0, -1)
+	end
+	return dir.Unit
 end
 
 -- ---------------------------------------------------------------------------
@@ -440,48 +407,53 @@ end
 local ATTACKS = {}
 
 ATTACKS.punch = function(player, char, hum, root, s, data)
-	if not spend(player, "punch") then
-		return
-	end
-	local t = now()
-	if t - (s.comboT or 0) > Config.Combo.window then
-		s.comboIndex = 0
-	end
-	s.comboIndex = (s.comboIndex or 0) % #Config.Combo.names + 1
-	s.comboT = t
-	local i = s.comboIndex
+	local index = tonumber(data.index) or 1
+	index = math.clamp(math.floor(index), 1, #Config.Combo.names)
+	local name = Config.Combo.names[index]
 	local dir = safeDir(char, data)
-	local origin = root.Position + Vector3.new(0, 1, 0)
-	local name = Config.Combo.names[i]
-	local dmg = Config.Combo.damage[i] * (0.9 + math.random() * 0.2)
-	local targets = findTargets(char, origin, dir, Config.Combo.reach[i], Config.Combo.radius[i], 3)
-	broadcastAction(char, name, {}, false)
-	sfxAll("whoosh", origin, 0.8, 1.1)
+	local origin = root.Position + Vector3.new(0, 1.2, 0)
 
+	broadcast(char, name, {}, player)
+	sfxAll("whoosh", origin, 0.8, 1.15 + index * 0.05)
+
+	-- рывок вперёд у атакующего
+	local lunge = Config.Combo.lunge[index] or 3
+	root.AssemblyLinearVelocity = root.AssemblyLinearVelocity
+		+ Vector3.new(dir.X, 0, dir.Z) * lunge * 3
+
+	local targets = findTargets(char, origin, dir, Config.Combo.reach[index], Config.Combo.radius[index])
 	if #targets == 0 then
 		remotes.Feedback:FireClient(player, { kind = "miss" })
+		Vfx.ring(origin + dir * 3.4, Config.Colors.plasma, 0.8, 5.5, 0.28, true, 0.3)
 		return
 	end
-	local finisher = (i == #Config.Combo.names)
-	for _, tgt in ipairs(targets) do
-		local tdir = (tgt.pos - origin)
-		if tdir.Magnitude < 0.1 then
-			tdir = dir
+
+	local finisher = (index == #Config.Combo.names)
+	local heavy = finisher or index == 3
+	for i = 1, #targets do
+		local t = targets[i]
+		local dirTo = t.pos - origin
+		if dirTo.Magnitude < 0.1 then
+			dirTo = dir
 		end
-		applyDamage(player, tgt.model, tgt.hum, dmg, {
-			dir = Vector3.new(tdir.X, 0.25, tdir.Z).Unit,
-			pos = tgt.pos + Vector3.new(0, 0.6, 0),
-			knock = Config.Combo.knock[i],
-			up = finisher and 30 or 4,
-			power = i / 3,
-			fxScale = finisher and 9 or 4 + i,
-			heavy = finisher,
-			ultBonus = Config.Combo.ult[i] * 0.2,
+		applyDamage(player, t.model, t.hum, t.root, Config.Combo.damage[index], {
+			dir = Vector3.new(dirTo.X, 0, dirTo.Z).Unit,
+			pos = t.pos + Vector3.new(0, 0.8, 0),
+			knock = Config.Combo.knock[index],
+			up = Config.Combo.launch[index],
+			power = index / 2,
+			heavy = heavy,
+			fxScale = finisher and 9 or (4 + index),
+			ultBonus = Config.Combo.ult[index] * 0.3,
 		})
 	end
-	-- дуга замаха
+
 	if finisher then
-		Vfx.ring(origin + dir * 4, Config.Colors.plasma, 1.5, 14, 0.35, true, 0.4)
+		Vfx.slash(CFrame.new(origin + dir * 3) * CFrame.Angles(0, math.atan2(dir.X, -dir.Z), 0),
+			Config.Colors.plasma, 14, 9, 0.3)
+		Vfx.ring(origin, Config.Colors.plasmaHot, 2, 20, 0.45, false, 0.5)
+		Vfx.flash(origin + dir * 4, Config.Colors.plasmaHot, 2, 20, 0.25)
+		sfxAll("whooshBig", origin, 1, 0.9)
 	end
 end
 
@@ -490,742 +462,475 @@ ATTACKS.kick = function(player, char, hum, root, s, data)
 		return
 	end
 	local dir = safeDir(char, data)
-	local origin = root.Position + Vector3.new(0, 1.2, 0)
-	broadcastAction(char, "kick", {}, false)
-	local targets = findTargets(char, origin, dir, Config.Damage.kickReach, Config.Damage.kickRadius, 3)
+	local origin = root.Position + Vector3.new(0, 1.4, 0)
+	broadcast(char, "kick", {}, player)
+	sfxAll("whoosh", origin, 1, 0.9)
+
+	-- атакующий подпрыгивает вперёд
+	root.AssemblyLinearVelocity = root.AssemblyLinearVelocity
+		+ Vector3.new(dir.X, 0, dir.Z) * 26 + Vector3.new(0, 16, 0)
+
+	local targets = findTargets(char, origin, dir, Config.Damage.kickReach, Config.Damage.kickRadius)
 	if #targets == 0 then
 		remotes.Feedback:FireClient(player, { kind = "miss" })
 		return
 	end
-	for _, tgt in ipairs(targets) do
-		local tdir = (tgt.pos - origin)
-		if tdir.Magnitude < 0.1 then
-			tdir = dir
+	for i = 1, #targets do
+		local t = targets[i]
+		local dirTo = t.pos - origin
+		if dirTo.Magnitude < 0.1 then
+			dirTo = dir
 		end
-		applyDamage(player, tgt.model, tgt.hum, Config.Damage.kick, {
-			dir = Vector3.new(tdir.X, 0.3, tdir.Z).Unit,
-			pos = tgt.pos + Vector3.new(0, 0.8, 0),
+		applyDamage(player, t.model, t.hum, t.root, Config.Damage.kick, {
+			dir = Vector3.new(dirTo.X, 0, dirTo.Z).Unit,
+			pos = t.pos + Vector3.new(0, 1, 0),
 			knock = Config.Damage.kickKnock,
-			up = Config.Damage.kickLauncher,
-			power = 1.4,
+			up = Config.Damage.kickLaunch,
+			power = 1.8,
 			heavy = true,
-			fxScale = 8,
+			fxScale = 10,
 		})
 	end
-	sfxAll("whooshBig", origin, 1, 0.95)
-end
-
-ATTACKS.heavy = function(player, char, hum, root, s, data)
-	if not spend(player, "heavy") then
-		return
-	end
-	local charge = math.clamp(tonumber(data.charge) or 0, 0, 1)
-	local dmg = Config.Damage.heavyMin + (Config.Damage.heavyMax - Config.Damage.heavyMin) * charge
-	local dir = safeDir(char, data)
-	local origin = root.Position + Vector3.new(0, 1, 0)
-	broadcastAction(char, "heavy", { charge = charge }, false)
-	sfxAll("whooshBig", origin, 1, 0.75)
-
-	-- выпад вперёд
-	knockTarget(char, dir, 24 + charge * 26, 6, false)
-
-	local targets = findTargets(char, origin, dir, Config.Damage.heavyReach, Config.Damage.heavyRadius, 4)
-	if #targets == 0 then
-		remotes.Feedback:FireClient(player, { kind = "miss" })
-		Vfx.shockwave(origin + dir * 8, Config.Colors.ultHot, 10, 0.5)
-		return
-	end
-	local hitPoint = targets[1].pos
-	for _, tgt in ipairs(targets) do
-		applyDamage(player, tgt.model, tgt.hum, dmg, {
-			dir = Vector3.new(dir.X, 0.25, dir.Z).Unit,
-			pos = tgt.pos + Vector3.new(0, 0.8, 0),
-			knock = Config.Damage.heavyKnock * (0.6 + charge * 0.6),
-			up = 22 + charge * 34,
-			power = 2.2,
-			heavy = true,
-			fxScale = 12,
-			sparks = 16,
-		})
-	end
-	Vfx.shockwave(hitPoint, Config.Colors.ultHot, 16 + charge * 14, 0.7)
-	Vfx.dust(hitPoint, 10, Config.Colors.hit, 1.4)
-	if charge > 0.75 then
-		Vfx.flash(hitPoint, Config.Colors.hit, 14, 60, 0.4)
-	end
-end
-
-ATTACKS.dash = function(player, char, hum, root, s, data)
-	if not spend(player, "dash") then
-		return
-	end
-	local dir = safeDir(char, data)
-	s.invulnUntil = now() + 0.35
-	broadcastAction(char, "dash", {}, false)
-	sfxAll("dash", root.Position, 1, 1)
-	local origin = root.Position
-	local pos = root.CFrame:ToWorldSpace(CFrame.new(0, 0.5, 2)).Position
-	Vfx.ghost(char, Config.Colors.violet, 0.4, 0.6)
-	Vfx.ring(origin, Config.Colors.violet, 1.5, 8, 0.35, false, 0.35)
-	-- рывок проходит сквозь врагов: лёгкий урон + отталкивание
-	local targets = findTargets(char, origin, dir, 10, 4.5, 4)
-	for _, tgt in ipairs(targets) do
-		applyDamage(player, tgt.model, tgt.hum, 45, {
-			dir = Vector3.new(dir.X, 0.2, dir.Z).Unit,
-			pos = tgt.pos + Vector3.new(0, 0.6, 0),
-			knock = 26,
-			up = 6,
-			power = 0.8,
-			fxScale = 4,
-			noCrit = true,
-		})
-	end
+	Vfx.ring(origin + dir * 4, Config.Colors.ultHot, 1.4, 12, 0.35, true, 0.4)
 end
 
 ATTACKS.laser = function(player, char, hum, root, s, data)
 	if not spend(player, "laser") then
 		return
 	end
-	local dir = data.direction
-	if typeof(dir) ~= "Vector3" or dir.Magnitude < 0.01 then
-		dir = root.CFrame.LookVector
-	end
-	dir = dir.Unit
-	local torso = char:FindFirstChild("Torso") or root
-	local origin = torso.Position + dir * 1.6
-	local claimed = data.origin
-	if typeof(claimed) == "Vector3" and (claimed - torso.Position).Magnitude < 14 then
-		origin = claimed + dir * 0.6
-	end
-	broadcastAction(char, "laser", {}, false)
+	local dir = safeDir(char, data)
+	broadcast(char, "laserCharge", {}, player)
+	sfxAll("charge", root.Position, 0.7, 1.2)
 
-	local hit = rayHit(char, origin, dir, Config.Damage.laserRange)
-	local endPos = origin + dir * Config.Damage.laserRange
-	if hit then
-		endPos = hit.Position
-	end
-	-- мощный луч
-	Vfx.beam(origin, endPos, Config.Colors.plasma, 2.4, 0.32, 3.2, Config.Colors.plasmaHot)
-	Vfx.impact(endPos, Config.Colors.plasma, 6, 0.3)
-	sfxAll("laser", origin, 1, 1)
-	sfxAll("boom", endPos, 0.6, 1.2)
-
-	if hit then
-		local model = hit.Instance:FindFirstAncestorOfClass("Model")
-		local tgtHum = model and getHum(model)
-		if tgtHum and tgtHum.Health > 0 and model ~= char then
-			applyDamage(player, model, tgtHum, Config.Damage.laser, {
-				dir = dir,
-				pos = hit.Position,
-				knock = 30,
-				up = 4,
-				power = 1.2,
-				heavy = true,
-				fxScale = 9,
-				sparks = 14,
-			})
-		else
-			remotes.Feedback:FireClient(player, { kind = "miss" })
-			Vfx.sparks(endPos, hit.Normal, 10, Config.Colors.plasma, 22, 0.4, 0.4)
-			Vfx.scorch(endPos, 3, 8)
-		end
-	end
-end
-
-ATTACKS.barrage = function(player, char, hum, root, s, data)
-	local start = data.state == "start"
-	if start then
-		if s.barrage then
-			return
-		end
-		if not spend(player, "barrage", { freeEnergy = true }) then
-			return
-		end
-		if s.energy < 10 then
-			deny(player, "barrage", "energy")
-			return
-		end
-		s.barrage = true
-		broadcastAction(char, "barrage", {}, false)
-		task.spawn(function()
-			while s.barrage do
-				local pl = player
-				local c = pl.Character
-				local h = getHum(c)
-				local r = getRoot(c)
-				if not c or not h or h.Health <= 0 or not r then
-					break
-				end
-				if s.energy < 3 then
-					break
-				end
-				s.energy = math.max(0, s.energy - 2.6)
-				syncStats(pl)
-				local look = r.CFrame.LookVector
-				local dir = (look + Vector3.new(
-					(math.random() - 0.5) * 0.09,
-					(math.random() - 0.5) * 0.09,
-					(math.random() - 0.5) * 0.09)).Unit
-				local origin = r.Position + Vector3.new(0, 1.2, 0) + dir * 1.6
-				local hit = rayHit(c, origin, dir, Config.Damage.barrageRange)
-				local endPos = origin + dir * Config.Damage.barrageRange
-				if hit then
-					endPos = hit.Position
-				end
-				local color = (math.random() < 0.5) and Config.Colors.plasma or Config.Colors.violet
-				Vfx.bolt(origin, endPos, color, Config.Colors.plasmaHot, 1.3, 0.18, 5)
-				sfxAll("laser", origin, 0.5, 1.5 + math.random() * 0.3)
-				if hit then
-					local model = hit.Instance:FindFirstAncestorOfClass("Model")
-					local tgtHum = model and getHum(model)
-					if tgtHum and tgtHum.Health > 0 and model ~= c then
-						applyDamage(player, model, tgtHum, Config.Damage.barrage, {
-							dir = dir,
-							pos = hit.Position,
-							knock = 6,
-							up = 1,
-							power = 0.6,
-							fxScale = 3.5,
-							sparks = 4,
-							noCrit = true,
-						})
-					end
-				end
-				task.wait(0.09)
-			end
-			s.barrage = false
-			remotes.Action:FireAllClients(player.Character, "barrageStop", { auth = true })
-		end)
-	else
-		s.barrage = false
-		remotes.Action:FireAllClients(char, "barrageStop", { auth = true })
-	end
-end
-
-ATTACKS.fly = function(player, char, hum, root, s, data)
-	local on = data.state and true or false
-	if on and not spend(player, "fly") then
-		return
-	end
-	s.flying = on
-	remotes.Action:FireAllClients(char, "setFly", { state = on })
-	if on then
-		Vfx.ring(root.Position, Config.Colors.plasma, 1.5, 9, 0.5, false, 0.4)
-		Vfx.dust(root.Position, 8, Config.Colors.plasma, 1.2)
-		sfxAll("dash", root.Position, 0.8, 1.2)
-	else
-		Vfx.dust(root.Position, 6, Color3.fromRGB(200, 200, 220), 1)
-	end
-end
-
-ATTACKS.block = function(player, char, hum, root, s, data)
-	local on = data.state and true or false
-	if on and not spend(player, "block") then
-		return
-	end
-	s.blocking = on
-	remotes.Action:FireAllClients(char, "setBlock", { state = on })
-	if on then
-		sfxAll("block", root.Position, 0.8, 1)
-		Vfx.ring(root.Position, Config.Colors.block, 1, 6, 0.35, false, 0.3)
-	end
-end
-
-ATTACKS.doublejump = function(player, char, hum, root, s, data)
-	local pos = root.Position
-	Vfx.ring(pos - Vector3.new(0, 2.2, 0), Config.Colors.plasma, 1.5, 10, 0.45, false, 0.5)
-	Vfx.dust(pos - Vector3.new(0, 2.4, 0), 8, Config.Colors.plasma, 1.2)
-	sfxAll("whoosh", pos, 0.8, 1.3)
-end
-
-ATTACKS.taunt = function(player, char, hum, root, s, data)
-	if not spend(player, "taunt") then
-		return
-	end
-	broadcastAction(char, "taunt", {}, false)
-	local pos = root.Position
-	Vfx.ring(pos, Config.Colors.ult, 2, 26, 0.8, false, 0.7)
-	Vfx.ring(pos + Vector3.new(0, 2, 0), Config.Colors.ult, 2, 16, 0.7, true, 0.5)
-	Vfx.pillar(pos, Config.Colors.ult, 26, 2.2, 0.7)
-	sfxAll("ultCharge", pos, 1, 0.9)
-	damageArea(player, pos, Config.Damage.tauntRadius, Config.Damage.tauntShock, {
-		knock = 45,
-		up = 18,
-		power = 1.2,
-		fxScale = 5,
-		noCrit = true,
-		dir = Vector3.new(0, 1, 0),
-	})
-end
-
-ATTACKS.reset = function(player, char, hum, root, s, data)
-	if not spend(player, "reset") then
-		return
-	end
-	Dummies.resetAll(player)
-	Vfx.ring(root.Position, Config.Colors.plasma, 2, 40, 1.0, false, 0.8)
-	Vfx.pillar(root.Position, Config.Colors.plasma, 40, 3, 0.8)
-	local pos = root.Position
-	remotes.Action:FireAllClients(char, "taunt", { auth = true })
-	remotes.Ack:FireAllClients("announce", "МАНЕКЕНЫ ВОССТАНОВЛЕНЫ")
-	sfxAll("ultCharge", pos, 1, 1.2)
-end
-
--- ---------------------------------------------------------------------------
--- УЛЬТА «ОБЛИТЕРАЦИЯ»
--- ---------------------------------------------------------------------------
-local function nearestTarget(origin, maxDist, excludeChar)
-	local best, bestDist = nil, maxDist
-	local list = {}
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p.Character and p.Character ~= excludeChar then
-			list[#list + 1] = p.Character
-		end
-	end
-	local dummies = workspace:FindFirstChild("CombatDummies")
-	if dummies then
-		for _, m in ipairs(dummies:GetChildren()) do
-			list[#list + 1] = m
-		end
-	end
-	for _, model in ipairs(list) do
-		local hum = getHum(model)
-		local root = getRoot(model)
-		if hum and hum.Health > 0 and root then
-			local d = (root.Position - origin).Magnitude
-			if d < bestDist then
-				best, bestDist = model, d
-			end
-		end
-	end
-	return best
-end
-
-local function doUlt(player, char, hum, root, s)
-	if s.ultRun then
-		return
-	end
-	if s.ult < ULTMAX - 0.5 then
-		deny(player, "ult", "energy")
-		return
-	end
-	s.ultRun = true
-	s.ult = 0
-	s.ultReadySent = false
-	syncStats(player)
-
-	local name = player.DisplayName
 	task.spawn(function()
-		local c = player.Character
-		local r = c and getRoot(c)
+		task.wait(0.3)
+		if not char.Parent then
+			return
+		end
+		local r = getRoot(char)
 		if not r then
-			s.ultRun = false
 			return
 		end
-		local pos = r.Position
+		local origin = r.Position + Vector3.new(0, 1.6, 0) + dir * 2
+		broadcast(char, "laser", {}, player)
 
-		-- ФАЗА 1: зарядка
-		remotes.Action:FireAllClients(c, "ultCharge", { auth = true })
-		remotes.Ult:FireAllClients({ phase = "charge", caster = c, name = name })
-		Vfx.pillar(pos, Config.Colors.ult, 80, 7, 1.2)
-		Vfx.ring(pos, Config.Colors.ult, 2, 34, 1.2, false, 0.7)
-		Vfx.flash(pos, Config.Colors.ult, 12, 90, 1.0)
-		sfxAll("ultCharge", pos, 1, 0.6)
-		-- подброс в воздух
-		knockTarget(c, Vector3.new(0, 1, 0), 0, 55, false)
-		task.wait(1.5)
-		if not getHum(player.Character) or getHum(player.Character).Health <= 0 then
-			s.ultRun = false
-			return
+		local range = Config.Damage.laserRange
+		local hitPoint, hitPos = nil, nil
+		-- луч упирается в арену/постройки, но бьёт всё живое по пути
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		local filter = { char }
+		if Dummies.folder then
+			filter[#filter + 1] = Dummies.folder
 		end
-		c = player.Character
-		r = getRoot(c)
-		pos = r and r.Position or pos
-
-		-- ФАЗА 2: вспышка
-		remotes.Action:FireAllClients(c, "ultBurst", { auth = true })
-		remotes.Ult:FireAllClients({ phase = "burst", caster = c, name = name })
-		Vfx.nova(pos, Config.Colors.ult, 46, 1.2)
-		sfxAll("boom", pos, 1, 0.8)
-		task.wait(0.55)
-
-		-- ФАЗА 3: залп энергетических снарядов по врагам
-		remotes.Action:FireAllClients(c, "ultFire", { auth = true })
-		for i = 1, Config.Damage.ultBoltCount do
-			c = player.Character
-			r = c and getRoot(c)
-			if not r or not getHum(c) or getHum(c).Health <= 0 then
-				break
-			end
-			local origin = r.Position + Vector3.new(0, 2.4, 0)
-			local target = nearestTarget(origin, Config.Damage.ultBoltRange, c)
-			local to
-			if target then
-				local tr = getRoot(target)
-				to = tr and tr.Position or (origin + Vector3.new(0, 0, -30))
-				to = to + Vector3.new((math.random() - 0.5) * 5, (math.random() - 0.5) * 3, (math.random() - 0.5) * 5)
-			else
-				to = origin + Vector3.new(
-					(math.random() - 0.5) * 90, -math.random() * 12, (math.random() - 0.5) * 90)
-			end
-			local color = ((i % 2) == 0) and Config.Colors.ultHot or Config.Colors.ult
-			Vfx.beam(origin, to, color, 2.6, 0.26, 2.6, Config.Colors.ultHot)
-			Vfx.impact(to, color, 12, 0.35)
-			damageArea(player, to, Config.Damage.ultBoltRadius, Config.Damage.ultBolt, {
-				knock = 12,
-				up = 8,
-				power = 1,
-				noCrit = true,
-				fxScale = 4,
-			})
-			if i % 2 == 1 then
-				sfxAll("laser", origin, 0.9, 1.2)
-			end
-			task.wait(0.075)
+		params.FilterDescendantsInstances = filter
+		local result = workspace:Raycast(origin, dir * range, params)
+		if result then
+			hitPos = result.Position
+			hitPoint = result.Instance
 		end
-		task.wait(0.35)
+		local to = hitPos or (origin + dir * range)
 
-		-- ФАЗА 4: луч облитерации
-		c = player.Character
-		r = c and getRoot(c)
-		if not r or not getHum(c) or getHum(c).Health <= 0 then
-			s.ultRun = false
-			remotes.Action:FireAllClients(player.Character, "ultEnd", { auth = true })
-			return
-		end
-		local origin = r.Position + Vector3.new(0, 2.6, 0)
-		local target = nearestTarget(origin, 320, c)
-		local dir
-		if target then
-			local tr = getRoot(target)
-			dir = (tr.Position - origin).Unit
-		else
-			dir = r.CFrame.LookVector
-		end
-		remotes.Ult:FireAllClients({ phase = "beam", caster = c, name = name })
-		Vfx.giantBeam(origin, dir, Config.Damage.ultBeamRange, Config.Colors.ult,
-			Config.Colors.ultHot, Config.Damage.ultBeamRadius, 1.3)
-		sfxAll("ultFire", origin, 1, 0.5)
-		damageBeam(player, origin, dir, Config.Damage.ultBeamRange, Config.Damage.ultBeamRadius,
-			Config.Damage.ultBeam, { knock = 120, up = 55, power = 3, heavy = true, fxScale = 14 })
-		-- финальная нова на конце луча + след
-		local hit = rayHit(c, origin, dir, Config.Damage.ultBeamRange)
-		local endPos = hit and hit.Position or (origin + dir * Config.Damage.ultBeamRange)
-		Vfx.nova(endPos, Config.Colors.ultHot, Config.Damage.ultNovaRadius, 1.5)
-		Vfx.scorch(endPos - Vector3.new(0, 1, 0), 34, 16)
-		sfxAll("boom", endPos, 1, 0.5)
-		task.wait(1.0)
+		Vfx.beam(origin, to, Config.Colors.plasma, 1.6, 0.28, 2.6, Config.Colors.plasmaHot)
+		Vfx.flash(origin, Config.Colors.plasmaHot, 3, 26, 0.22)
+		Vfx.impact(to, Config.Colors.plasmaHot, 8, 0.4)
+		sfxAll("laser", origin, 1, 1)
+		remotes.Action:FireAllClients(char, "laserFire", { auth = true }, nil)
 
-		-- ФАЗА 5: завершение
-		remotes.Action:FireAllClients(player.Character, "ultEnd", { auth = true })
-		remotes.Ult:FireAllClients({ phase = "end", caster = player.Character, name = name })
-		s.ultRun = false
-		syncStats(player)
+		damageBeam(player, origin, dir, (to - origin).Magnitude + 2, Config.Damage.laserRadius,
+			Config.Damage.laser, { knock = 70, up = 14, power = 1.6, fxScale = 9 })
 	end)
 end
 
 ATTACKS.ult = function(player, char, hum, root, s, data)
-	if not spend(player, "ult", { freeEnergy = true }) then
+	if s.ultActive then
 		return
 	end
-	doUlt(player, char, hum, root, s)
-end
-
--- ---------------------------------------------------------------------------
--- Подключение игрока
--- ---------------------------------------------------------------------------
-local function setupPlayer(player)
-	state[player] = {
-		energy = Config.Energy.max,
-		ult = 0,
-		cds = {},
-		blocking = false,
-		flying = false,
-		comboIndex = 0,
-		comboT = 0,
-		damageDealt = 0,
-		kills = 0,
-		hitStreak = 0,
-		lastDamage = 0,
-		lastAction = 0,
-		invulnUntil = 0,
-	}
-
-	local ls = player:FindFirstChild("leaderstats")
-	if not ls then
-		ls = Instance.new("Folder")
-		ls.Name = "leaderstats"
-		ls.Parent = player
+	if s.ult < Config.Ult.max - 0.5 then
+		remotes.Ack:FireClient(player, "denied", { action = "ult", reason = "energy" })
+		return
 	end
-	local function mkStat(name, value, cls)
-		local v = Instance.new(cls or "IntValue")
-		v.Name = name
-		v.Value = value
-		v.Parent = ls
-		return v
-	end
-	mkStat("Урон", 0)
-	mkStat("КО", 0)
-	mkStat("Комбо", 0)
+	local origin = root.Position
+	s.ult = 0
+	s.ultActive = true
+	s.invulnUntil = now() + 3.4
+	setStat(player, "Ult", 0)
 
-	local cs = player:FindFirstChild("CombatStats")
-	if not cs then
-		cs = Instance.new("Folder")
-		cs.Name = "CombatStats"
-		cs.Parent = player
-	end
-	local function mk(name, value)
-		local v = Instance.new("IntValue")
-		v.Name = name
-		v.Value = value
-		v.Parent = cs
-		return v
-	end
-	mk("Energy", Config.Energy.max)
-	mk("Ult", 0)
+	remotes.Ult:FireAllClients({ phase = "charge", caster = char, name = player.Name })
+	sfxAll("ultCharge", origin, 1, 0.7)
+	Vfx.pillar(origin, Config.Colors.ult, 60, 6, 1.0)
+	Vfx.chargeOrb(root, Vector3.new(0, 0, 0), Config.Colors.ult, 1.0, 3)
 
-	-- регенерация
 	task.spawn(function()
-		while player.Parent do
-			task.wait(0.25)
-			local s = st(player)
-			if s then
-				local dt = 0.25
-				s.energy = math.min(Config.Energy.max, s.energy + Config.Energy.regen * dt)
-				if not s.ultRun then
-					s.ult = math.min(ULTMAX, s.ult + Config.Ult.passive * dt)
-					if s.ult >= ULTMAX and not s.ultReadySent then
-						s.ultReadySent = true
-						local r = player.Character and getRoot(player.Character)
-						sfxAll("ready", r and r.Position or Vector3.new(), 0.8)
-					end
-				end
-				-- регенерация здоровья
-				local char = player.Character
-				local hum = getHum(char)
-				if hum and hum.Health > 0 and (now() - (s.lastDamage or 0)) > Config.Fighter.regenDelay then
-					local maxHp = hum.MaxHealth
-					if hum.Health < maxHp then
-						hum.Health = math.min(maxHp, hum.Health + maxHp * Config.Fighter.regenPerSecond * dt)
-					end
-				end
-				syncStats(player)
+		local ok, err = pcall(function()
+		task.wait(1.0)
+		if not char.Parent then
+			return
+		end
+		local r = getRoot(char)
+		if not r then
+			return
+		end
+		local here = r.Position
+
+		-- НОВА
+		remotes.Ult:FireAllClients({ phase = "burst", caster = char })
+		Vfx.nova(here, Config.Colors.ultHot, 52, 1.3)
+		Vfx.ring(here, Config.Colors.ult, 3, 70, 0.9, false, 0.8)
+		Vfx.flash(here, Config.Colors.ultHot, 5, 90, 0.5)
+		sfxAll("ultFire", here, 1, 0.6)
+		r.AssemblyLinearVelocity = Vector3.new(0, 72, 0)
+
+		local list = findInRadius(here, 46, char)
+		for i = 1, #list do
+			local t = list[i]
+			local dirTo = t.pos - here
+			if dirTo.Magnitude < 0.5 then
+				dirTo = Vector3.new(0, 1, 0)
 			end
+			applyDamage(player, t.model, t.hum, t.root, Config.Damage.ultNova, {
+				dir = Vector3.new(dirTo.X, 0, dirTo.Z).Unit,
+				knock = 210, up = 70, power = 2.4, heavy = true, fxScale = 14,
+			})
+		end
+
+		task.wait(0.45)
+		if not char.Parent then
+			return
+		end
+		local r2 = getRoot(char)
+		if not r2 then
+			return
+		end
+
+		-- ГИГАНТСКИЙ ЛУЧ
+		remotes.Ult:FireAllClients({ phase = "beam", caster = char })
+		sfxAll("ultFire", r2.Position, 1, 0.5)
+		local aim = safeDir(char, {})
+		local start = r2.Position + Vector3.new(0, 0.5, 0)
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		local filter = { char }
+		if Dummies.folder then
+			filter[#filter + 1] = Dummies.folder
+		end
+		params.FilterDescendantsInstances = filter
+		local result = workspace:Raycast(start + aim * 2, aim * Config.Damage.ultBeamRange, params)
+		local endPos = result and result.Position or (start + aim * Config.Damage.ultBeamRange)
+		Vfx.giantBeam(start, aim, (endPos - start).Magnitude, Config.Colors.ult, Config.Colors.ultHot,
+			Config.Damage.ultBeamRadius, 1.1)
+		Vfx.flash(start, Config.Colors.ultHot, 4, 60, 0.4)
+		damageBeam(player, start, aim, (endPos - start).Magnitude + 4, Config.Damage.ultBeamRadius,
+			Config.Damage.ultBeam, { knock = 260, up = 80, power = 2.6, fxScale = 18 })
+
+		task.wait(1.0)
+		if not char.Parent then
+			return
+		end
+		local r3 = getRoot(char)
+
+		-- ПРИЗЕМЛЕНИЕ
+		remotes.Ult:FireAllClients({ phase = "end", caster = char })
+		if r3 then
+			r3.AssemblyLinearVelocity = Vector3.new(0, -140, 0)
+			task.wait(0.3)
+			local ground = r3.Position
+			Vfx.shockwave(ground - Vector3.new(0, 2.6, 0), Config.Colors.ultHot, 40, 0.7)
+			Vfx.dust(ground, 14, Color3.fromRGB(200, 205, 220), 1.6)
+			Vfx.scorch(ground - Vector3.new(0, 2.9, 0), 12, 8)
+			sfxAll("hitHeavy", ground, 1, 0.6)
+			local list2 = findInRadius(ground, 26, char)
+			for i = 1, #list2 do
+				local t = list2[i]
+				applyDamage(player, t.model, t.hum, t.root, Config.Damage.ultSlam, {
+					knock = 120, up = 34, power = 2, heavy = true, fxScale = 12,
+				})
+			end
+		end
+		end)
+		s.ultActive = false
+		s.invulnUntil = now() + 0.6
+		if not ok then
+			warn("[EPIC COMBAT] сценарий ульты: " .. tostring(err))
 		end
 	end)
 end
 
+ATTACKS.fly = function(player, char, hum, root, s, data)
+	local on = data.state and true or false
+	s.flying = on
+	if not on then
+		s.boosting = false
+		if hum and hum.Health > 0 then
+			hum.PlatformStand = false
+		end
+		root.AssemblyLinearVelocity = root.AssemblyLinearVelocity * 0.3
+	else
+		if hum and hum.Health > 0 then
+			hum.PlatformStand = true
+			root.AssemblyLinearVelocity = root.AssemblyLinearVelocity + Vector3.new(0, 26, 0)
+		end
+		Vfx.ring(root.Position - Vector3.new(0, 2.4, 0), Config.Colors.ice, 1.5, 14, 0.5, false, 0.4)
+		Vfx.pillar(root.Position, Config.Colors.ice, 22, 3.2, 0.5, true)
+	end
+	broadcast(char, "setFly", { state = on }, player)
+end
+
+ATTACKS.boost = function(player, char, hum, root, s, data)
+	s.boosting = data.state and true or false
+end
+
+ATTACKS.doublejump = function(player, char, hum, root, s, data)
+	-- двойной прыжок рисует клиент; сервер только показывает эффект всем
+	Vfx.ring(root.Position - Vector3.new(0, 2.6, 0), Config.Colors.ice, 1.2, 11, 0.4, false, 0.4)
+	sfxAll("jump", root.Position, 0.8, 1.3)
+end
+
+ATTACKS.reset = function(player, char, hum, root, s, data)
+	local n = Dummies.resetAll(Vfx)
+	remotes.Ack:FireClient(player, "announce", {
+		text = "МАНЕКЕНЫ НА МЕСТАХ", sub = "сброшено: " .. tostring(n),
+		color = Config.Colors.plasma, time = 1.4, scale = 0.8,
+	})
+end
+
+-- ---------------------------------------------------------------------------
+-- Обработка запросов
+-- ---------------------------------------------------------------------------
+local function onAttack(player, action, data)
+	if type(action) ~= "string" then
+		return
+	end
+	local char = player.Character
+	local hum = getHum(char)
+	local root = getRoot(char)
+	if not hum or not root then
+		return
+	end
+	local s = stOf(player)
+	local fn = ATTACKS[action]
+	if fn then
+		local ok, err = pcall(fn, player, char, hum, root, s, data or {})
+		if not ok then
+			warn("[EPIC COMBAT] атака " .. action .. ": " .. tostring(err))
+		end
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- Персонаж
+-- ---------------------------------------------------------------------------
 local function onCharacter(player, char)
-	local hum = char:WaitForChild("Humanoid", 10)
-	local root = char:WaitForChild("HumanoidRootPart", 10)
+	local hum = char:WaitForChild("Humanoid", 8)
+	local root = char:WaitForChild("HumanoidRootPart", 8)
 	if not hum or not root then
 		return
 	end
 	hum.MaxHealth = Config.Fighter.health
 	hum.Health = Config.Fighter.health
 	hum.WalkSpeed = Config.Fighter.walkSpeed
-	hum.JumpPower = Config.Fighter.jumpPower
 	hum.UseJumpPower = true
+	hum.JumpPower = Config.Fighter.jumpPower
 	hum.BreakJointsOnDeath = false
-	hum.NameDisplayDistance = 0
+	hum.PlatformStand = false
+	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 	hum.HealthDisplayDistance = 0
-	-- выкидываем стандартный Animate: он играет свои анимации через Animator
-	-- и смешивался бы с нашими процедурными позами
-	local animate = char:FindFirstChild("Animate")
-	if animate then
-		animate:Destroy()
+	hum.NameDisplayDistance = 0
+
+	local s = stOf(player)
+	s.flying = false
+	s.boosting = false
+	s.ultActive = false
+	s.comboIndex = 0
+	s.combo = 0
+	s.lastDamage = now() - Config.Fighter.regenDelay
+	s.invulnUntil = now() + Config.Fighter.spawnProtect
+	s.energy = Config.Energy.max
+	setStat(player, "Energy", Config.Energy.max)
+
+	-- стандартные анимации Roblox нам мешают
+	local function killAnimate(inst)
+		if inst and (inst.Name == "Animate" or inst.Name == "AnimateR15") then
+			inst:Destroy()
+		end
 	end
 	for _, obj in ipairs(char:GetChildren()) do
-		if obj:IsA("LocalScript") and obj.Name == "Animate" then
-			obj:Destroy()
-		end
+		killAnimate(obj)
 	end
-	char:SetAttribute(KO_ATTR, false)
-	local s = st(player)
-	if s then
-		s.flying = false
-		s.blocking = false
-		s.comboIndex = 0
-		s.barrage = false
-		s.energy = Config.Energy.max
-		s.ultRun = false
-		s.cds = {}
-	end
-	syncStats(player)
-	-- появиться на арене
-	local spawnPart = workspace:FindFirstChild("ArenaSpawn")
-	if spawnPart and spawnPart:IsA("BasePart") then
-		char:PivotTo(spawnPart.CFrame * CFrame.new(0, 4, 0))
-	end
-	Vfx.pillar(root.Position, Config.Colors.plasma, 24, 3, 0.8)
-	Vfx.ring(root.Position, Config.Colors.plasma, 2, 16, 0.7, false, 0.5)
-	sfxAll("ready", root.Position, 1)
+	char.ChildAdded:Connect(killAnimate)
 
-	hum.Died:Connect(function()
-		char:SetAttribute(KO_ATTR, true)
-		broadcastAction(char, "ko", { auth = true })
-		Dummies.ragdoll(char)
-		if s then
-			s.flying = false
-			s.blocking = false
-			s.barrage = false
-			s.ultRun = false
-			s.energy = Config.Energy.max
-			syncStats(player)
-		end
-	end)
+	broadcast(char, "respawn", {}, nil)
+	remotes.Ack:FireClient(player, "announce", {
+		text = "В БОЙ!", sub = "ЛКМ — комбо · F — пинок · R — лазер · X — ульта · V — полёт",
+		color = Config.Colors.plasmaHot, time = 2.4, scale = 0.9,
+	})
 end
 
 -- ---------------------------------------------------------------------------
--- Табло на арене
+-- Табло арены
 -- ---------------------------------------------------------------------------
-local function updateScoreboard()
-	local board = workspace:FindFirstChild("Arena")
-	local sboard = board and board:FindFirstChild("Scoreboard")
-	if not sboard then
-		return
-	end
-	local gui = sboard:FindFirstChildOfClass("SurfaceGui")
-	if not gui then
-		return
-	end
+local boardRows
+
+local function collectRows()
 	local list = {}
-	for _, p in ipairs(Players:GetPlayers()) do
-		local ls = p:FindFirstChild("leaderstats")
-		if ls then
-			local dStat = ls:FindFirstChild("Урон")
-			local kStat = ls:FindFirstChild("КО")
-			local cStat = ls:FindFirstChild("Комбо")
-			list[#list + 1] = {
-				name = p.DisplayName,
-				damage = dStat and dStat.Value or 0,
-				ko = kStat and kStat.Value or 0,
-				combo = cStat and cStat.Value or 0,
-			}
+	for _, pl in ipairs(Players:GetPlayers()) do
+		local s = state[pl]
+		if s then
+			list[#list + 1] = { name = pl.Name, damage = s.damage, kos = s.kos }
 		end
 	end
 	table.sort(list, function(a, b)
 		return a.damage > b.damage
 	end)
+	return list
+end
+
+local function updateScoreboard()
+	local gui
+	local board = workspace:FindFirstChild("Scoreboard", true)
+	if board then
+		gui = board:FindFirstChildOfClass("SurfaceGui") or board:FindFirstChildOfClass("BillboardGui")
+	end
+	if not gui then
+		return
+	end
+	if not boardRows then
+		boardRows = {}
+		for i = 1, 8 do
+			local row = gui:FindFirstChild("Row" .. i)
+			if row and row:IsA("TextLabel") then
+				boardRows[i] = row
+			end
+		end
+	end
+	local list = collectRows()
 	for i = 1, 8 do
-		local row = gui:FindFirstChild("Row" .. i)
-		local entry = list[i]
-		if row and row:IsA("TextLabel") then
+		local row = boardRows[i]
+		if row then
+			local entry = list[i]
 			if entry then
-				row.Text = string.format("%d. %s   %d ур.   %d КО   x%d",
-					i, entry.name, entry.damage, entry.ko, entry.combo)
+				row.Text = i .. ". " .. entry.name .. "   " .. math.floor(entry.damage) .. " урона · " .. entry.kos .. " КО"
 			else
 				row.Text = i .. ". —"
 			end
 		end
-	end
-	local title = gui:FindFirstChild("Title")
-	if title then
-		title.Text = "ЛУЧШИЕ БОЙЦЫ АРЕНЫ"
 	end
 end
 
 -- ---------------------------------------------------------------------------
 -- Запуск
 -- ---------------------------------------------------------------------------
+local spawnPad
+
 local function init()
+	remotes = RS:WaitForChild("CombatRemotes", 20)
+	if not remotes then
+		warn("[EPIC COMBAT] сервер не нашёл CombatRemotes")
+		return
+	end
+	Vfx.init()
+	local okD, errD = pcall(function()
+		Dummies.init()
+	end)
+	if not okD then
+		warn("[EPIC COMBAT] манекены: " .. tostring(errD))
+	end
+
+	spawnPad = workspace:FindFirstChild("ArenaSpawn", true)
 	Players.RespawnTime = Config.Fighter.koTime
 	Players.CharacterAutoLoads = true
 
-	remotes = RS:WaitForChild("CombatRemotes")
-	Vfx.init()
-
-	local spawnPart = workspace:FindFirstChild("ArenaSpawn")
-	if spawnPart and spawnPart:IsA("BasePart") then
-		spawnPad = spawnPart
+	local attackRemote = remotes:WaitForChild("Attack", 10)
+	if attackRemote then
+		attackRemote.OnServerEvent:Connect(onAttack)
 	end
 
-	Dummies.init()
-
-	Players.PlayerAdded:Connect(setupPlayer)
-	for _, p in ipairs(Players:GetPlayers()) do
-		setupPlayer(p)
+	local function hookPlayer(pl)
+		setupPlayer(pl)
+		pl.CharacterAdded:Connect(function(c)
+			task.spawn(function()
+				local ok, err = pcall(onCharacter, pl, c)
+				if not ok then
+					warn("[EPIC COMBAT] персонаж: " .. tostring(err))
+				end
+			end)
+		end)
+		if pl.Character then
+			task.spawn(function()
+				pcall(onCharacter, pl, pl.Character)
+			end)
+		end
 	end
-	Players.PlayerRemoving:Connect(function(p)
-		state[p] = nil
+	Players.PlayerAdded:Connect(hookPlayer)
+	for _, pl in ipairs(Players:GetPlayers()) do
+		hookPlayer(pl)
+	end
+	Players.PlayerRemoving:Connect(function(pl)
+		state[pl] = nil
 	end)
 
-	Players.PlayerAdded:Connect(function(p)
-		p.CharacterAdded:Connect(function(char)
-			onCharacter(p, char)
-		end)
-		if p.Character then
-			onCharacter(p, p.Character)
-		end
-	end)
-	for _, p in ipairs(Players:GetPlayers()) do
-		p.CharacterAdded:Connect(function(char)
-			onCharacter(p, char)
-		end)
-		if p.Character then
-			onCharacter(p, p.Character)
-		end
-	end
-
-	-- приём «намерений» клиента
-	remotes.Attack.OnServerEvent:Connect(function(player, action, data)
-		if type(action) ~= "string" or #action > 24 then
-			return
-		end
-		local s = st(player)
-		local char = player.Character
-		if not s or not char then
-			return
-		end
-		local hum = getHum(char)
-		local root = getRoot(char)
-		if not hum or not root or hum.Health <= 0 then
-			return
-		end
-		local t = now()
-		if t - (s.lastAction or 0) < 0.03 then
-			return
-		end
-		s.lastAction = t
-		local handler = ATTACKS[action]
-		if handler then
-			local ok, err = pcall(handler, player, char, hum, root, s, data or {})
-			if not ok then
-				warn("[CombatServer] " .. action .. ": " .. tostring(err))
+	-- главный цикл
+	local acc = 0
+	local scoreAcc = 0
+	RunService.Heartbeat:Connect(function(dt)
+		-- энергия, ульта, регенерация
+		for pl, s in pairs(state) do
+			local char = pl.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			s.energy = math.min(Config.Energy.max, s.energy + Config.Energy.regen * dt)
+			s.ult = math.min(Config.Ult.max, s.ult + Config.Ult.passive * dt)
+			s.combo = (s.combo > 0) and (s.combo - dt * 0.6) or 0
+			if hum and hum.Health > 0 then
+				if s.flying then
+					local drain = Config.Move.flyHoverDrain + (s.boosting and Config.Move.flyBoostCost or 0)
+					s.energy = math.max(0, s.energy - drain * dt)
+					if s.energy <= 0 then
+						s.boosting = false
+					end
+				end
+				if now() - s.lastDamage > Config.Fighter.regenDelay and hum.Health < hum.MaxHealth then
+					hum.Health = math.min(hum.MaxHealth, hum.Health + Config.Fighter.regenPerSecond * dt)
+				end
+			elseif s.flying then
+				s.flying = false
+				s.boosting = false
 			end
+			setStat(pl, "Energy", math.floor(s.energy))
+			setStat(pl, "Ult", math.floor(s.ult))
 		end
-	end)
 
-	-- обслуживающие циклы
-	task.spawn(function()
-		while true do
-			task.wait(1)
-			-- возврат упавших с арены
-			for _, p in ipairs(Players:GetPlayers()) do
-				local char = p.Character
+		-- манекены: полная жизнь и возврат на место
+		pcall(Dummies.update, dt, Vfx)
+
+		-- вернуть упавших на арену
+		acc = acc + dt
+		if acc >= 0.5 then
+			acc = 0
+			for _, pl in ipairs(Players:GetPlayers()) do
+				local char = pl.Character
 				local root = getRoot(char)
 				if root and root.Position.Y < Config.Move.fallResetY then
-					local pad = spawnPad or workspace:FindFirstChild("ArenaSpawn")
-					if pad then
+					local pad = spawnPad or workspace:FindFirstChild("ArenaSpawn", true)
+					if pad and pad:IsA("BasePart") then
 						char:PivotTo(pad.CFrame * CFrame.new(0, 6, 0))
 						root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 						Vfx.pillar(root.Position, Config.Colors.plasma, 30, 3, 0.8)
-						Vfx.ring(root.Position, Config.Colors.plasma, 2, 18, 0.7, false, 0.5)
-						remotes.Hurt:FireClient(p, { kind = "fall", damage = 0 })
+						remotes.Hurt:FireClient(pl, { kind = "fall", damage = 0 })
 					end
 				end
 			end
-			-- дроу-лимит эффектов
-			Vfx.cleanup()
+			pcall(Vfx.cleanup)
 		end
-	end)
 
-	task.spawn(function()
-		while true do
-			task.wait(2)
-			updateScoreboard()
+		-- табло
+		scoreAcc = scoreAcc + dt
+		if scoreAcc >= 2 then
+			scoreAcc = 0
+			pcall(updateScoreboard)
 		end
 	end)
 end
 
 init()
+
+return true

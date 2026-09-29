@@ -9,7 +9,7 @@
   * центральный БОЕВОЙ ПИЛОН, откуда падают бойцы;
   * 8 белых МАНЕКЕНОВ трёх типов (манекен / тяжёлый / титан) на постах;
   * ТАБЛО «ЛУЧШИЕ БОЙЦЫ АРЕНЫ» (урон, нокауты, комбо) — обновляется сервером;
-  * готовый боец (StarterCharacter) классического R6-рига с энергоядром;
+  * стартовая площадка арены и белые тренировочные манекены на подиумах;
   * ReplicatedStorage с боевыми модулями и RemoteEvent'ами;
   * ServerScriptService: боёвка, VFX, манекены;
   * StarterPlayerScripts: клиент (HUD, камера, управление, аниматор).
@@ -512,29 +512,28 @@ def build_arena(ws):
                  C_TRIM, mat=M_NEON, cancollide=False, castshadow=False, transparency=0.3)
     arena[3].append(decor)
 
-    # --- посты для манекенов (белые тренировочные бойцы) -------------------
-    posts = item("Folder", [p_str("Name", "DummyPosts")])
-
-    def add_post(idx, kind, radius, angle, ring_color):
-        x, z = math.cos(angle) * radius, math.sin(angle) * radius
-        facing = mat_look((-math.cos(angle), 0, -math.sin(angle)))  # лицом к центру
-        pad = item("Part", part_props("Post_%s_%d" % (kind, idx), (0.6, 6.8, 6.8),
-                                      (x, FLOOR_TOP + 0.3, z), (52, 56, 72),
-                                      mat=M_METAL, shape=SHAPE_CYLINDER, rotation=facing))
-        pad[3].append(item("Part", part_props("PostRing_%s_%d" % (kind, idx),
-                                              (0.28, 8.4, 8.4), (x, FLOOR_TOP + 0.6, z),
-                                              ring_color, mat=M_NEON, shape=SHAPE_CYLINDER,
-                                              transparency=0.15, cancollide=False,
-                                              castshadow=False, rotation=mat_rotz(math.pi / 2))))
-        posts[3].append(pad)
-
-    angle0 = 0.39
-    for i in range(4):
-        add_post(i, "normal", 22.0, angle0 + i * math.pi / 2, C_TRIM)
-    add_post(10, "heavy", 34.0, angle0 + math.pi / 4, C_VIOLET)
-    add_post(11, "heavy", 34.0, angle0 + math.pi + math.pi / 4, C_VIOLET)
-    add_post(20, "titan", 46.0, angle0 + math.pi / 2 + 0.2, C_ULT)
-    add_post(21, "titan", 46.0, angle0 - math.pi / 2 - 0.2, C_ULT)
+    # --- подиумы под белых манекенов (см. Config.Dummy: круг 42 стада) ----
+    posts = item("Folder", [p_str("Name", "DummyPads")])
+    dummy_count = 8
+    dummy_radius = 42.0
+    for i in range(dummy_count):
+        a = i / dummy_count * math.pi * 2
+        x, z = math.sin(a) * dummy_radius, math.cos(a) * dummy_radius
+        posts[3].append(item("Part", part_props(
+            "DummyPad%d" % (i + 1), (0.2, 7.6, 7.6), (x, FLOOR_TOP + 0.1, z),
+            (46, 50, 66), mat=M_SLATE, shape=SHAPE_CYLINDER,
+            transparency=0.15, cancollide=False, castshadow=False,
+            rotation=mat_rotz(math.pi / 2))))
+        posts[3].append(item("Part", part_props(
+            "DummyRing%d" % (i + 1), (0.22, 8.8, 8.8), (x, FLOOR_TOP + 0.24, z),
+            C_TRIM, mat=M_NEON, shape=SHAPE_CYLINDER,
+            transparency=0.25, cancollide=False, castshadow=False,
+            rotation=mat_rotz(math.pi / 2))))
+    posts[3].append(item("Part", part_props(
+        "DummyCenter", (0.2, 9.0, 9.0), (0, FLOOR_TOP + 0.1, 0),
+        (52, 56, 74), mat=M_SLATE, shape=SHAPE_CYLINDER,
+        transparency=0.25, cancollide=False, castshadow=False,
+        rotation=mat_rotz(math.pi / 2))))
     arena[3].append(posts)
 
     # --- табло -------------------------------------------------------------
@@ -570,96 +569,6 @@ def build_arena(ws):
 
 
 # ---------------------------------------------------------------------------
-# СТАРТОВЫЙ ПЕРСОНАЖ (классический R6 + энергоядро)
-# ---------------------------------------------------------------------------
-
-def build_starter_character(sp):
-    ch = item("Model", [p_str("Name", "StarterCharacter")])
-    parts = {}
-
-    def mkpart(name, size, pos, rgb, cancollide=True, transparency=0.0, mat=M_SMOOTH):
-        it = item("Part", [
-            p_str("Name", name),
-            p_bool("Anchored", False),
-            p_bool("CanCollide", cancollide),
-            p_color3uint8("Color3uint8", rgb),
-            p_cframe("CFrame", pos, mat_id()),
-            p_token("Material", mat),
-            p_float("Reflectance", 0.0),
-            p_token("TopSurface", 0),
-            p_token("BottomSurface", 0),
-            p_float("Transparency", transparency),
-            p_v3("size", *size),
-        ])
-        ch[3].append(it)
-        parts[name] = it
-        return it
-
-    body = (238, 242, 250)
-    mkpart("HumanoidRootPart", (2, 2, 1), (0, 3, 0), body, False, 1.0)
-    mkpart("Torso", (2, 2, 1), (0, 3, 0), body)
-    head = mkpart("Head", (2, 1, 1), (0, 4.5, 0), body)
-    head[3].append(item("SpecialMesh", [
-        p_str("Name", "Mesh"), p_token("MeshType", 5),
-        p_v3("Scale", 1.25, 1.25, 1.25)]))
-    mkpart("Left Arm", (1, 2, 1), (-1.5, 3, 0), body)
-    mkpart("Right Arm", (1, 2, 1), (1.5, 3, 0), body)
-    mkpart("Left Leg", (1, 2, 1), (-0.5, 1, 0), body)
-    mkpart("Right Leg", (1, 2, 1), (0.5, 1, 0), body)
-
-    # энергоядро в груди (клиент красит его по заряду ульты)
-    core = mkpart("Core", (0.6, 0.6, 0.6), (0, 3.1, -0.7), (60, 220, 255), False, 0.4, M_NEON)
-    core[3].append(item("PointLight", [
-        p_str("Name", "CoreLight"), p_float("Brightness", 1.4),
-        p_color3("Color", (120, 220, 255)), p_bool("Enabled", True),
-        p_float("Range", 12), p_bool("Shadows", False)]))
-    ch[3].append(item("WeldConstraint", [
-        p_str("Name", "CoreWeld"),
-        p_ref("Part0", parts["Torso"][1]),
-        p_ref("Part1", core[1]),
-    ]))
-
-    # Humanoid + Animator
-    hum = item("Humanoid", [
-        p_str("Name", "Humanoid"),
-        p_bool("AutoRotate", True),
-        p_bool("BreakJointsOnDeath", False),
-        p_float("Health", 2500),
-        p_float("MaxHealth", 2500),
-        p_float("JumpPower", 55),
-        p_bool("UseJumpPower", True),
-        p_float("WalkSpeed", 20),
-        p_token("DisplayDistanceType", 2),
-        p_float("HealthDisplayDistance", 0),
-        p_float("NameDisplayDistance", 0),
-        p_token("RigType", 0),
-    ])
-    hum[3].append(item("Animator", [p_str("Name", "Animator")]))
-    ch[3].append(hum)
-
-    # шарниры R6. Точки вращения — в плечах/бёдрах/шее (см. CombatPose).
-    joints = [
-        ("RootJoint", "HumanoidRootPart", "Torso", (0, 0, 0), (0, 0, 0)),
-        ("Neck", "Torso", "Head", (0, 1, 0), (0, -0.5, 0)),
-        ("Left Shoulder", "Torso", "Left Arm", (-1, 0.5, 0), (0.5, 0.5, 0)),
-        ("Right Shoulder", "Torso", "Right Arm", (1, 0.5, 0), (-0.5, 0.5, 0)),
-        ("Left Hip", "Torso", "Left Leg", (-0.5, -1, 0), (0, 1, 0)),
-        ("Right Hip", "Torso", "Right Leg", (0.5, -1, 0), (0, 1, 0)),
-    ]
-    for name, p0, p1, c0, c1 in joints:
-        ch[3].append(item("Motor6D", [
-            p_str("Name", name),
-            p_ref("Part0", parts[p0][1]),
-            p_ref("Part1", parts[p1][1]),
-            p_cframe("C0", c0, mat_id()),
-            p_cframe("C1", c1, mat_id()),
-        ]))
-
-    sp[3].append(ch)
-    return ch
-
-
-# ---------------------------------------------------------------------------
 # СКРИПТЫ
 # ---------------------------------------------------------------------------
 
@@ -683,7 +592,7 @@ def build_scripts(root_children, ws):
         ]))
 
     remotes = item("Folder", [p_str("Name", "CombatRemotes")])
-    for rname in ("Attack", "Action", "Feedback", "Hurt", "Knock", "Ult", "Sfx", "Ack"):
+    for rname in ("Attack", "Action", "Feedback", "Hurt", "Ult", "Sfx", "Ack"):
         remotes[3].append(item("RemoteEvent", [p_str("Name", rname)]))
     rs[3].append(remotes)
 
@@ -706,12 +615,11 @@ def build_scripts(root_children, ws):
     sp = item("StarterPlayer", [
         p_str("Name", "StarterPlayer"),
         p_bool("EnableMouseLockOption", True),
-        p_bool("LoadCharacterAppearance", False),
+        p_bool("LoadCharacterAppearance", True),
         p_float("CameraMaxZoomDistance", 120),
         p_float("CameraMinZoomDistance", 6),
         p_token("CameraMode", 0),
     ])
-    build_starter_character(sp)
     sps = item("StarterPlayerScripts", [p_str("Name", "StarterPlayerScripts")])
     sps[3].append(item("LocalScript", [
         p_str("Name", "CombatClient"),

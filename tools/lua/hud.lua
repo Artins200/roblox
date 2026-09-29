@@ -1,17 +1,13 @@
 --[[
-	CombatHud — весь интерфейс бойца.
+	CombatHud — интерфейс бойца.
 
-	* Полосы: ЗДОРОВЬЕ, ЭНЕРГИЯ, УЛЬТА «ОБЛИТЕРАЦИЯ»
-	* Счётчик КОМБО + всплеск при попадании
-	* Панель способностей с откатами и подсказками клавиш
-	* Прицел + маркер попадания (обычный/крит)
-	* Табло ТОП БОЙЦОВ и личная статистика (урон, DPS, макс. удар, КО)
-	* Баннеры-объявления, виньетка при низком HP, индикатор полёта
-	* Панель управления (скрывается по H)
+	Низ по центру: четыре компактные кнопки способностей (ЛКМ · F · R · X),
+	над ними тонкие полосы ЖИЗНЬ / ЭНЕРГИЯ / УЛЬТА и строка со статистикой.
+	Плюс: комбо, прицел и маркер попадания, баннеры, панель помощи (H),
+	диагностика (F3).
 ]]
 
 local Players = game:GetService("Players")
-local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 
 local RS = script.Parent
@@ -20,35 +16,33 @@ local Config = require(RS:WaitForChild("CombatConfig"))
 local Hud = {}
 
 local player = Players.LocalPlayer
-
-local gui
-local barHp, barHpChip, txtHp
-local barEn, barEnTxt
-local barUlt, barUltTxt, ultStroke, ultFill
-local comboBox, comboText, comboSub
-local abilitySlots = {}
-local crosshair, hitmarker, hitDot
-local banner, bannerSub
-local topBoard, topRows = {}, {}
-local statDamage, statDps, statMax, statKo, statCombo
-local flyBox, flyText
-local helpBox
-local chargeBar, chargeFill, chargeLabel
-local ultReadyOverlay
-
 local C = Config.Colors
-
-local function slotColor(slot)
-	return slot.color or Color3.new(1, 1, 1)
-end
-
 local FONT = Enum.Font.GothamBold
 local FONT_BLACK = Enum.Font.GothamBlack
 
+local gui
+local barHp, txtHp
+local barEn, txtEn
+local barUlt, txtUlt, ultStroke
+local statLine
+local slotViews = {}
+local comboBox, comboText
+local crosshair, hitmarker
+local banner, bannerSub, bannerT
+local helpBox, diagLabel
+local chargeBox, chargeFill, chargeText
+local flyTag
+local ultWasFull = false
+
+-- ---------------------------------------------------------------------------
+-- Мелкие помощники
+-- ---------------------------------------------------------------------------
 local function new(class, props, parent)
 	local inst = Instance.new(class)
-	for k, v in pairs(props) do
-		inst[k] = v
+	if props then
+		for k, v in pairs(props) do
+			inst[k] = v
+		end
 	end
 	inst.Parent = parent
 	return inst
@@ -63,7 +57,7 @@ local function stroke(inst, color, thickness, transparency)
 	new("UIStroke", {
 		Color = color or Color3.fromRGB(0, 0, 0),
 		Thickness = thickness or 1.5,
-		Transparency = transparency or 0.25,
+		Transparency = transparency or 0.3,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 	}, inst)
 	return inst
@@ -74,573 +68,400 @@ local function frame(props, parent)
 end
 
 local function label(props, parent)
-	local l = new("TextLabel", props, parent)
-	l.BackgroundTransparency = props.BackgroundTransparency or 1
+	local p = props or {}
+	local l = new("TextLabel", p, parent)
+	l.BackgroundTransparency = 1
 	l.BorderSizePixel = 0
 	return l
 end
 
 local function number(n)
-	local s = tostring(math.floor(n + 0.5))
-	return (s:reverse():gsub("(%d%d%d)", "%1 "):reverse():gsub("^%s+", ""))
+	local s = tostring(math.floor((n or 0) + 0.5))
+	local out = s:reverse():gsub("(%d%d%d)", "%1 "):reverse()
+	out = out:gsub("^%s+", "")
+	return out
 end
-
 Hud.number = number
+
+local function fracFill(bar, frac)
+	bar.Size = UDim2.new(math.clamp(frac or 0, 0, 1), 0, 1, 0)
+end
 
 -- ---------------------------------------------------------------------------
 -- Построение интерфейса
 -- ---------------------------------------------------------------------------
 function Hud.init()
 	if gui then
-		return
+		return true
 	end
-	local pgui = player:WaitForChild("PlayerGui")
+	local pgui = player:WaitForChild("PlayerGui", 10)
+	if not pgui then
+		return false
+	end
 	gui = new("ScreenGui", {
 		Name = "CombatHud",
 		ResetOnSpawn = false,
-		IgnoreGuiInset = false,
+		IgnoreGuiInset = true,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		DisplayOrder = 3,
 	}, pgui)
 
-	-- ======================= ПОЛОСЫ (низ, центр) =======================
-	local bars = frame({
+	-- ============================ ПОЛОСЫ ============================
+	local stack = frame({
 		Name = "Bars",
 		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -22),
-		Size = UDim2.new(0, 640, 0, 118),
+		Position = UDim2.new(0.5, 0, 1, -12),
+		Size = UDim2.new(0, 340, 0, 168),
 		BackgroundTransparency = 1,
 	}, gui)
 
-	local function makeBar(y, height, color1, color2, textPrefix)
+	local function bar(name, y, h, col1, col2, r)
 		local holder = frame({
-			Name = "Bar" .. (textPrefix or ""),
+			Name = name,
 			Position = UDim2.new(0, 0, 0, y),
-			Size = UDim2.new(1, 0, 0, height),
-			BackgroundColor3 = Color3.fromRGB(12, 14, 22),
+			Size = UDim2.new(1, 0, 0, h),
+			BackgroundColor3 = Color3.fromRGB(10, 12, 20),
 			BackgroundTransparency = 0.25,
 			BorderSizePixel = 0,
 			ClipsDescendants = true,
-		}, bars)
-		corner(holder, height / 2)
-		stroke(holder, Color3.fromRGB(0, 0, 0), 2, 0.35)
-
-		local chip = frame({
-			Name = "Chip",
-			Size = UDim2.new(1, 0, 1, 0),
-			Position = UDim2.new(0, 0, 0, 0),
-			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-			BackgroundTransparency = 0.55,
-			BorderSizePixel = 0,
-		}, holder)
-		corner(chip, height / 2)
-
+		}, stack)
+		corner(holder, r or h * 0.5)
+		stroke(holder, Color3.fromRGB(0, 0, 0), 1.5, 0.4)
 		local fill = frame({
 			Name = "Fill",
 			Size = UDim2.new(1, 0, 1, 0),
-			Position = UDim2.new(0, 0, 0, 0),
-			BackgroundColor3 = color1,
+			BackgroundColor3 = col1,
 			BorderSizePixel = 0,
 		}, holder)
-		corner(fill, height / 2)
-		local grad = new("UIGradient", { Color = ColorSequence.new(color1, color2), Rotation = 0 }, fill)
-
-		local text = label({
-			Text = "0 / 0",
-			Font = FONT_BLACK,
-			TextScaled = true,
-			TextColor3 = Color3.fromRGB(255, 255, 255),
-			TextStrokeTransparency = 0.4,
-			TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
-			Size = UDim2.new(1, -20, 1, 0),
-			Position = UDim2.new(0, 10, 0, 0),
-			ZIndex = 2,
-		}, holder)
-		return holder, fill, text, chip
+		corner(fill, r or h * 0.5)
+		new("UIGradient", { Color = ColorSequence.new(col1, col2), Rotation = 0 }, fill)
+		return holder, fill
 	end
 
-	local hpBar
-	hpBar, barHp, txtHp, barHpChip = makeBar(0, 34, Color3.fromRGB(190, 40, 40), Color3.fromRGB(255, 110, 70), "Hp")
-	txtHp.TextSize = 20
-	local enBar
-	enBar, barEn, barEnTxt = makeBar(40, 18, C.energy, Color3.fromRGB(150, 255, 230), "En")
-	barEnTxt.Text = ""
-	enBar.BackgroundTransparency = 0.35
+	local hpHolder
+	hpHolder, barHp = bar("Hp", 0, 20, Color3.fromRGB(180, 40, 40), Color3.fromRGB(255, 120, 80))
+	txtHp = label({
+		Text = "2500 / 2500", Font = FONT_BLACK, TextSize = 14,
+		TextColor3 = Color3.fromRGB(255, 255, 255), TextStrokeTransparency = 0.5,
+		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+		Size = UDim2.new(1, -12, 1, 0), Position = UDim2.new(0, 6, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 2,
+	}, hpHolder)
 
-	-- ульта (отдельный стиль — маджента → золото)
-	local ultHolder = frame({
-		Name = "UltBar",
-		Position = UDim2.new(0, 0, 0, 64),
-		Size = UDim2.new(1, 0, 0, 26),
-		BackgroundColor3 = Color3.fromRGB(14, 10, 22),
-		BackgroundTransparency = 0.2,
-		BorderSizePixel = 0,
-		ClipsDescendants = true,
-	}, bars)
-	corner(ultHolder, 13)
-	ultStroke = stroke(ultHolder, C.ult, 2, 0.4)
-	ultFill = frame({
-		Name = "Fill",
-		Size = UDim2.new(0, 0, 1, 0),
-		Position = UDim2.new(0, 0, 0, 0),
-		BackgroundColor3 = C.ult,
-		BorderSizePixel = 0,
-	}, ultHolder)
-	corner(ultFill, 13)
-	new("UIGradient", {
-		Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, C.ult),
-			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(200, 120, 255)),
-			ColorSequenceKeypoint.new(1, C.ultHot),
-		}),
-		Rotation = 0,
-	}, ultFill)
-	barUlt = ultFill
-	barUltTxt = label({
-		Name = "UltText",
-		Text = "УЛЬТА «ОБЛИТЕРАЦИЯ» — 0%",
-		Font = FONT_BLACK,
-		TextScaled = true,
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		TextStrokeTransparency = 0.35,
-		Size = UDim2.new(1, -20, 1, 0),
-		Position = UDim2.new(0, 10, 0, 0),
-		ZIndex = 2,
+	local enHolder
+	enHolder, barEn = bar("En", 26, 8, C.energy, Color3.fromRGB(160, 255, 240), 4)
+
+	ultStroke = nil
+	local ultHolder
+	ultHolder, barUlt = bar("Ult", 40, 13, C.ult, C.ultHot, 6)
+	ultStroke = ultHolder:FindFirstChildOfClass("UIStroke")
+	txtUlt = label({
+		Text = "УЛЬТА 0%", Font = FONT_BLACK, TextSize = 11,
+		TextColor3 = Color3.fromRGB(255, 240, 255), TextStrokeTransparency = 0.55,
+		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+		Size = UDim2.new(1, -12, 1, 0), Position = UDim2.new(0, 6, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 2,
 	}, ultHolder)
 
+	statLine = label({
+		Text = "", Font = FONT, TextSize = 12,
+		TextColor3 = Color3.fromRGB(210, 220, 235), TextStrokeTransparency = 0.6,
+		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+		Position = UDim2.new(0, 0, 0, 58), Size = UDim2.new(1, 0, 0, 16),
+		TextXAlignment = Enum.TextXAlignment.Center,
+	}, stack)
 
-	-- ======================= СТАТИСТИКА (низ, справа от полос) =======================
-	local stats = frame({
-		Name = "Stats",
-		AnchorPoint = Vector2.new(1, 1),
-		Position = UDim2.new(1, -18, 1, -22),
-		Size = UDim2.new(0, 230, 0, 96),
-		BackgroundColor3 = Color3.fromRGB(10, 12, 20),
-		BackgroundTransparency = 0.35,
-		BorderSizePixel = 0,
-	}, gui)
-	corner(stats, 10)
-	stroke(stats, Color3.fromRGB(80, 200, 255), 1.5, 0.6)
-	label({
-		Text = "СТАТИСТИКА",
-		Font = FONT_BLACK,
-		TextSize = 13,
-		TextColor3 = C.energy,
-		Position = UDim2.new(0, 10, 0, 4),
-		Size = UDim2.new(1, -20, 0, 16),
-		TextXAlignment = Enum.TextXAlignment.Left,
-	}, stats)
-	local function statLine(y, name, color)
-		label({
-			Text = name,
-			Font = FONT,
-			TextSize = 13,
-			TextColor3 = Color3.fromRGB(180, 190, 210),
-			Position = UDim2.new(0, 10, 0, y),
-			Size = UDim2.new(0.6, 0, 0, 16),
-			TextXAlignment = Enum.TextXAlignment.Left,
-		}, stats)
-		return label({
-			Text = "0",
-			Font = FONT_BLACK,
-			TextSize = 14,
-			TextColor3 = color or Color3.new(1, 1, 1),
-			Position = UDim2.new(0.35, 0, 0, y),
-			Size = UDim2.new(0.6, -10, 0, 16),
-			TextXAlignment = Enum.TextXAlignment.Right,
-		}, stats)
-	end
-	statDamage = statLine(22, "УРОН", Color3.fromRGB(255, 210, 120))
-	statDps = statLine(40, "DPS", Color3.fromRGB(255, 140, 120))
-	statMax = statLine(58, "МАКС. УДАР", Color3.fromRGB(255, 240, 180))
-	statKo = statLine(76, "НОКАУТЫ", Color3.fromRGB(255, 120, 160))
+	flyTag = label({
+		Text = "", Font = FONT_BLACK, TextSize = 12,
+		TextColor3 = C.ice, TextStrokeTransparency = 0.6,
+		Position = UDim2.new(0, 0, 0, 74), Size = UDim2.new(1, 0, 0, 16),
+		TextXAlignment = Enum.TextXAlignment.Center,
+	}, stack)
 
-	-- ======================= ТАБЛО (верх, слева) =======================
-	topBoard = frame({
-		Name = "TopBoard",
-		Position = UDim2.new(0, 18, 0, 18),
-		Size = UDim2.new(0, 250, 0, 26 + 5 * 18),
-		BackgroundColor3 = Color3.fromRGB(10, 12, 20),
-		BackgroundTransparency = 0.4,
-		BorderSizePixel = 0,
-	}, gui)
-	corner(topBoard, 10)
-	stroke(topBoard, C.ultHot, 1.5, 0.55)
-	label({
-		Text = "ТОП БОЙЦОВ ПО УРОНУ",
-		Font = FONT_BLACK,
-		TextSize = 13,
-		TextColor3 = C.ultHot,
-		Position = UDim2.new(0, 10, 0, 5),
-		Size = UDim2.new(1, -20, 0, 16),
-		TextXAlignment = Enum.TextXAlignment.Left,
-	}, topBoard)
-	for i = 1, 5 do
-		local row = label({
-			Text = (i .. ". —"),
-			Font = FONT,
-			TextSize = 13,
-			TextColor3 = Color3.fromRGB(230, 235, 245),
-			Position = UDim2.new(0, 12, 0, 22 + (i - 1) * 18),
-			Size = UDim2.new(1, -24, 0, 16),
-			TextXAlignment = Enum.TextXAlignment.Left,
-		}, topBoard)
-		topRows[i] = row
-	end
+	-- ==================== ЧЕТЫРЕ КНОПКИ СПОСОБНОСТЕЙ ====================
+	local order = { "punch", "kick", "laser", "ult" }
+	local size = 52
+	local gap = 10
+	local total = #order * size + (#order - 1) * gap
 
-	-- ======================= СПОСОБНОСТИ (низ, слева) =======================
-	local abil = frame({
+	local row = frame({
 		Name = "Abilities",
-		AnchorPoint = Vector2.new(0, 1),
-		Position = UDim2.new(0, 18, 1, -22),
-		Size = UDim2.new(0, 288, 0, 150),
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, -96),
+		Size = UDim2.new(0, total, 0, size),
 		BackgroundTransparency = 1,
 	}, gui)
-	local list = {
-		{ id = "punch", key = "ЛКМ", name = "КОМБО", color = C.plasma },
-		{ id = "heavy", key = "ПКМ", name = "ТЯЖЁЛЫЙ", color = Color3.fromRGB(255, 160, 80) },
-		{ id = "kick", key = "E", name = "ПИНОК", color = Color3.fromRGB(255, 210, 90) },
-		{ id = "dash", key = "Q", name = "РЫВОК", color = C.violet },
-		{ id = "laser", key = "F", name = "ЛАЗЕР", color = C.plasma },
-		{ id = "barrage", key = "C", name = "ЗАЛП", color = Color3.fromRGB(120, 255, 220) },
-		{ id = "block", key = "R", name = "БЛОК", color = C.block },
-		{ id = "ult", key = "X", name = "УЛЬТА", color = C.ult },
-		{ id = "fly", key = "V", name = "ПОЛЁТ", color = Color3.fromRGB(140, 200, 255) },
-		{ id = "taunt", key = "Z", name = "ТАУНТ", color = Color3.fromRGB(255, 150, 220) },
-		{ id = "reset", key = "T", name = "МАНЕКЕНЫ", color = Color3.fromRGB(200, 200, 210) },
-		{ id = "help", key = "H", name = "ПАНЕЛЬ", color = Color3.fromRGB(160, 170, 190) },
-	}
-	for i, info in ipairs(list) do
-		local col = (i - 1) % 6
-		local row = math.floor((i - 1) / 6)
+
+	for i, id in ipairs(order) do
+		local def = Config.Abilities[id]
+		local col = C.plasma
+		if id == "kick" then
+			col = Color3.fromRGB(255, 200, 90)
+		elseif id == "laser" then
+			col = C.plasma
+		elseif id == "ult" then
+			col = C.ult
+		end
 		local slot = frame({
-			Name = "Slot_" .. info.name,
-			Position = UDim2.new(0, col * 48, 1, -row * 76 - 76),
-			Size = UDim2.new(0, 44, 0, 72),
+			Name = "Slot_" .. id,
+			Position = UDim2.new(0, (i - 1) * (size + gap), 0, 0),
+			Size = UDim2.new(0, size, 0, size),
 			BackgroundColor3 = Color3.fromRGB(12, 14, 22),
-			BackgroundTransparency = 0.3,
+			BackgroundTransparency = 0.25,
 			BorderSizePixel = 0,
-		}, abil)
-		corner(slot, 7)
-		stroke(slot, info.color, 1.5, 0.35)
-		label({
-			Text = info.key,
-			Font = FONT_BLACK,
-			TextSize = 14,
-			TextColor3 = info.color,
-			Position = UDim2.new(0, 0, 0, 3),
-			Size = UDim2.new(1, 0, 0, 16),
-		}, slot)
-		local cdOverlay = frame({
-			Name = "Cooldown",
-			Position = UDim2.new(0, 0, 0, 0),
+		}, row)
+		corner(slot, 10)
+		local st = stroke(slot, col, 1.6, 0.3)
+
+		local fill = frame({
+			Name = "Charge",
+			AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 0, 1, 0),
 			Size = UDim2.new(1, 0, 0, 0),
-			BackgroundColor3 = Color3.fromRGB(0, 0, 0),
-			BackgroundTransparency = 0.35,
+			BackgroundColor3 = col,
+			BackgroundTransparency = 0.55,
 			BorderSizePixel = 0,
-			ZIndex = 3,
 		}, slot)
-		corner(cdOverlay, 7)
-		label({
-			Text = info.name,
-			Font = FONT,
-			TextSize = 9,
-			TextColor3 = Color3.fromRGB(225, 230, 240),
-			TextWrapped = true,
-			Position = UDim2.new(0, 1, 0, 20),
-			Size = UDim2.new(1, -2, 0, 50),
-			Rotation = 0,
-			ZIndex = 4,
+		corner(fill, 10)
+
+		local keyLabel = label({
+			Text = def.key, Font = FONT_BLACK, TextSize = 15, TextColor3 = col,
+			TextStrokeTransparency = 0.75,
+			Position = UDim2.new(0, 0, 0, 3), Size = UDim2.new(1, 0, 0, 18),
+			TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 3,
 		}, slot)
-		abilitySlots[info.id] = { overlay = cdOverlay, stroke = slot:FindFirstChildOfClass("UIStroke"), color = info.color }
+		local nameLabel = label({
+			Text = def.name, Font = FONT, TextSize = 9,
+			TextColor3 = Color3.fromRGB(225, 232, 245), TextWrapped = true,
+			Position = UDim2.new(0, 0, 0, 21), Size = UDim2.new(1, 0, 0, 30),
+			TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 3,
+		}, slot)
+		local cdLabel = label({
+			Text = "", Font = FONT_BLACK, TextSize = 16,
+			TextColor3 = Color3.fromRGB(255, 255, 255), TextStrokeTransparency = 0.4,
+			TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+			Position = UDim2.new(0, 0, 0, 26), Size = UDim2.new(1, 0, 0, 20),
+			TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4, Visible = false,
+		}, slot)
+
+		slotViews[id] = {
+			slot = slot, fill = fill, stroke = st, color = col,
+			label = keyLabel, name = nameLabel, cd = cdLabel,
+		}
 	end
 
-	-- ======================= ПРИЦЕЛ + МАРКЕР ПОПАДАНИЯ =======================
+	-- ============================ ПРИЦЕЛ ============================
 	crosshair = frame({
 		Name = "Crosshair",
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0.5, 0, 0.5, 0),
-		Size = UDim2.new(0, 26, 0, 26),
+		Size = UDim2.new(0, 22, 0, 22),
 		BackgroundTransparency = 1,
 	}, gui)
 	for _, def in ipairs({
-		{ UDim2.new(0, 2, 0, 7), UDim2.new(0.5, -1, 0, 0) },
-		{ UDim2.new(0, 2, 0, 7), UDim2.new(0.5, -1, 1, -7) },
-		{ UDim2.new(0, 7, 0, 2), UDim2.new(0, 0, 0.5, -1) },
-		{ UDim2.new(0, 7, 0, 2), UDim2.new(1, -7, 0.5, -1) },
+		{ UDim2.new(0, 2, 0, 6), UDim2.new(0.5, -1, 0, 0) },
+		{ UDim2.new(0, 2, 0, 6), UDim2.new(0.5, -1, 1, -6) },
+		{ UDim2.new(0, 6, 0, 2), UDim2.new(0, 0, 0.5, -1) },
+		{ UDim2.new(0, 6, 0, 2), UDim2.new(1, -6, 0.5, -1) },
 	}) do
 		frame({
-			Size = def[1],
-			Position = def[2],
-			BackgroundColor3 = Color3.fromRGB(230, 250, 255),
-			BackgroundTransparency = 0.15,
-			BorderSizePixel = 0,
+			Size = def[1], Position = def[2],
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 0.25, BorderSizePixel = 0,
 		}, crosshair)
 	end
-	hitDot = frame({
-		Size = UDim2.new(0, 3, 0, 3),
-		Position = UDim2.new(0.5, -1.5, 0.5, -1.5),
-		BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-		BorderSizePixel = 0,
-		BackgroundTransparency = 0.2,
-	}, crosshair)
 
 	hitmarker = frame({
 		Name = "Hitmarker",
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.new(0.5, 0, 0.5, 0),
-		Size = UDim2.new(0, 44, 0, 44),
+		Size = UDim2.new(0, 40, 0, 40),
 		BackgroundTransparency = 1,
 		Visible = false,
 	}, gui)
 	for _, rot in ipairs({ 45, 135, 225, 315 }) do
-		local line = frame({
+		frame({
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.new(0.5, 0, 0.5, 0),
-			Size = UDim2.new(0, 2.5, 0, 13),
-			BackgroundColor3 = Color3.new(1, 1, 1),
-			BorderSizePixel = 0,
+			Size = UDim2.new(0, 3, 0, 16),
 			Rotation = rot,
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BorderSizePixel = 0,
 		}, hitmarker)
-		local r = math.rad(rot)
-		line.Position = UDim2.new(0.5, math.cos(r) * 14, 0.5, math.sin(r) * 14)
 	end
 
-	-- ======================= ЗАРЯД =======================
-	local charge = frame({
-		Name = "Charge",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0.5, 44),
-		Size = UDim2.new(0, 180, 0, 12),
-		BackgroundColor3 = Color3.fromRGB(10, 12, 20),
-		BackgroundTransparency = 0.3,
-		BorderSizePixel = 0,
-		Visible = false,
-		ClipsDescendants = true,
-	}, gui)
-	corner(charge, 6)
-	stroke(charge, Color3.fromRGB(255, 180, 90), 1.5, 0.3)
-	chargeFill = frame({
-		Size = UDim2.new(0, 0, 1, 0),
-		Position = UDim2.new(0, 0, 0, 0),
-		BackgroundColor3 = Color3.fromRGB(255, 170, 60),
-		BorderSizePixel = 0,
-	}, charge)
-	corner(chargeFill, 6)
-	new("UIGradient", {
-		Color = ColorSequence.new(Color3.fromRGB(255, 220, 120), Color3.fromRGB(255, 90, 60)),
-	}, chargeFill)
-	chargeLabel = label({
-		Text = "ЗАРЯД 0%",
-		Font = FONT_BLACK,
-		TextSize = 12,
-		TextColor3 = Color3.fromRGB(255, 240, 220),
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 0, -4),
-		Size = UDim2.new(0, 200, 0, 14),
-	}, charge)
-	chargeBar = charge
-
-	-- ======================= КОМБО =======================
+	-- ============================ КОМБО ============================
 	comboBox = frame({
 		Name = "Combo",
 		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 1, -150),
-		Size = UDim2.new(0, 220, 0, 74),
+		Position = UDim2.new(0.5, 0, 0.5, -46),
+		Size = UDim2.new(0, 150, 0, 48),
 		BackgroundTransparency = 1,
 		Visible = false,
 	}, gui)
 	comboText = label({
-		Text = "1",
-		Font = FONT_BLACK,
-		TextScaled = true,
-		TextColor3 = Color3.fromRGB(255, 235, 150),
-		TextStrokeTransparency = 0.3,
-		Size = UDim2.new(1, 0, 0.72, 0),
+		Text = "0", Font = FONT_BLACK, TextSize = 30,
+		TextColor3 = C.ultHot, TextStrokeTransparency = 0.25,
+		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+		Size = UDim2.new(1, 0, 0, 34), TextXAlignment = Enum.TextXAlignment.Center,
 	}, comboBox)
-	comboSub = label({
-		Text = "КОМБО",
-		Font = FONT_BLACK,
-		TextSize = 18,
-		TextColor3 = Color3.fromRGB(255, 200, 120),
-		Position = UDim2.new(0, 0, 0.72, 0),
-		Size = UDim2.new(1, 0, 0.28, 0),
-		TextStrokeTransparency = 0.5,
+	label({
+		Text = "КОМБО", Font = FONT_BLACK, TextSize = 11,
+		TextColor3 = Color3.fromRGB(255, 255, 255), TextStrokeTransparency = 0.5,
+		Position = UDim2.new(0, 0, 0, 32), Size = UDim2.new(1, 0, 0, 14),
+		TextXAlignment = Enum.TextXAlignment.Center,
 	}, comboBox)
 
-	-- ======================= ПОЛЁТ =======================
-	flyBox = frame({
-		Name = "FlyInfo",
-		AnchorPoint = Vector2.new(1, 1),
-		Position = UDim2.new(1, -18, 1, -126),
-		Size = UDim2.new(0, 230, 0, 30),
-		BackgroundColor3 = Color3.fromRGB(10, 12, 20),
-		BackgroundTransparency = 0.4,
-		BorderSizePixel = 0,
-		Visible = false,
-	}, gui)
-	corner(flyBox, 8)
-	stroke(flyBox, Config.Colors.plasma, 1.5, 0.4)
-	flyText = label({
-		Text = "ПОЛЁТ",
-		Font = FONT_BLACK,
-		TextSize = 14,
-		TextColor3 = Config.Colors.plasma,
-		Size = UDim2.new(1, -16, 1, 0),
-		Position = UDim2.new(0, 8, 0, 0),
-		TextXAlignment = Enum.TextXAlignment.Left,
-	}, flyBox)
-
-	-- ======================= БАННЕР =======================
+	-- ============================ БАННЕР ============================
 	banner = label({
-		Name = "Banner",
-		Text = "",
-		Font = FONT_BLACK,
-		TextScaled = true,
-		TextColor3 = C.ultHot,
-		TextStrokeTransparency = 0.15,
+		Text = "", Font = FONT_BLACK, TextSize = 40,
+		TextColor3 = Color3.fromRGB(255, 255, 255), TextStrokeTransparency = 0.2,
 		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 96),
-		Size = UDim2.new(0, 700, 0, 46),
-		TextTransparency = 1,
-		Visible = false,
+		Size = UDim2.new(0.8, 0, 0, 46),
+		TextXAlignment = Enum.TextXAlignment.Center, TextTransparency = 1,
+		Visible = false, ZIndex = 5,
 	}, gui)
 	bannerSub = label({
-		Name = "BannerSub",
-		Text = "",
-		Font = FONT,
-		TextSize = 18,
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		TextStrokeTransparency = 0.4,
+		Text = "", Font = FONT, TextSize = 16,
+		TextColor3 = Color3.fromRGB(230, 238, 250), TextStrokeTransparency = 0.4,
+		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = UDim2.new(0.5, 0, 0, 144),
-		Size = UDim2.new(0, 700, 0, 22),
-		TextTransparency = 1,
-		Visible = false,
+		Position = UDim2.new(0.5, 0, 0, 140),
+		Size = UDim2.new(0.8, 0, 0, 22),
+		TextXAlignment = Enum.TextXAlignment.Center, TextTransparency = 1,
+		Visible = false, ZIndex = 5,
 	}, gui)
 
-	-- ======================= ПАНЕЛЬ УПРАВЛЕНИЯ =======================
+	-- ========================= ЗАРЯД (полоса) =========================
+	chargeBox = frame({
+		Name = "Charge",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0.5, 58),
+		Size = UDim2.new(0, 260, 0, 20),
+		BackgroundColor3 = Color3.fromRGB(10, 12, 20),
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, gui)
+	corner(chargeBox, 10)
+	stroke(chargeBox, C.ult, 1.6, 0.3)
+	chargeFill = frame({
+		Size = UDim2.new(0, 0, 1, 0),
+		BackgroundColor3 = C.ult,
+		BorderSizePixel = 0,
+	}, chargeBox)
+	corner(chargeFill, 10)
+	new("UIGradient", { Color = ColorSequence.new(C.ult, C.ultHot), Rotation = 0 }, chargeFill)
+	chargeText = label({
+		Text = "", Font = FONT_BLACK, TextSize = 13,
+		TextColor3 = Color3.fromRGB(255, 255, 255), TextStrokeTransparency = 0.4,
+		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+		Size = UDim2.new(1, -10, 1, 0), Position = UDim2.new(0, 5, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 2,
+	}, chargeBox)
+
+	-- ========================= ПАНЕЛЬ ПОМОЩИ =========================
 	helpBox = frame({
 		Name = "Help",
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -18, 0.42, 0),
-		Size = UDim2.new(0, 320, 0, 26 + #Config.Help * 19),
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -16, 0, 16),
+		Size = UDim2.new(0, 330, 0, 24 * #Config.Help + 44),
 		BackgroundColor3 = Color3.fromRGB(10, 12, 20),
-		BackgroundTransparency = 0.4,
+		BackgroundTransparency = 0.25,
 		BorderSizePixel = 0,
+		Visible = false,
 	}, gui)
-	corner(helpBox, 10)
-	stroke(helpBox, Color3.fromRGB(150, 160, 190), 1.5, 0.6)
+	corner(helpBox, 12)
+	stroke(helpBox, C.plasma, 1.4, 0.4)
 	label({
-		Text = "УПРАВЛЕНИЕ  (H — скрыть)",
-		Font = FONT_BLACK,
-		TextSize = 13,
-		TextColor3 = Color3.fromRGB(200, 210, 235),
-		Position = UDim2.new(0, 10, 0, 5),
-		Size = UDim2.new(1, -20, 0, 16),
+		Text = "УПРАВЛЕНИЕ", Font = FONT_BLACK, TextSize = 15, TextColor3 = C.plasmaHot,
+		Position = UDim2.new(0, 12, 0, 10), Size = UDim2.new(1, -24, 0, 18),
 		TextXAlignment = Enum.TextXAlignment.Left,
 	}, helpBox)
 	for i, line in ipairs(Config.Help) do
 		label({
-			Text = line[1],
-			Font = FONT_BLACK,
-			TextSize = 12,
-			TextColor3 = C.plasma,
-			Position = UDim2.new(0, 10, 0, 20 + (i - 1) * 19),
-			Size = UDim2.new(0, 82, 0, 17),
-			TextXAlignment = Enum.TextXAlignment.Left,
-		}, helpBox)
-		label({
-			Text = line[2],
-			Font = FONT,
-			TextSize = 12,
-			TextColor3 = Color3.fromRGB(225, 230, 240),
-			Position = UDim2.new(0, 94, 0, 20 + (i - 1) * 19),
-			Size = UDim2.new(1, -104, 0, 17),
-			TextXAlignment = Enum.TextXAlignment.Left,
+			Text = "• " .. line, Font = FONT, TextSize = 12,
+			TextColor3 = Color3.fromRGB(225, 232, 245), TextWrapped = true,
+			Position = UDim2.new(0, 12, 0, 30 + (i - 1) * 24),
+			Size = UDim2.new(1, -24, 0, 22),
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
 		}, helpBox)
 	end
 
-	-- оверлей «ульта готова»
-	ultReadyOverlay = frame({
-		Name = "UltReady",
-		Size = UDim2.new(1, 0, 1, 0),
-		BackgroundTransparency = 1,
+	-- ========================= ДИАГНОСТИКА =========================
+	diagLabel = label({
+		Text = "", Font = FONT, TextSize = 11,
+		TextColor3 = Color3.fromRGB(150, 255, 190), TextStrokeTransparency = 0.6,
+		TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0, 12, 1, -8),
+		Size = UDim2.new(0, 420, 0, 16),
+		TextXAlignment = Enum.TextXAlignment.Left,
 		Visible = false,
 	}, gui)
-	local edge = frame({
-		Size = UDim2.new(1, 0, 1, 0),
-		BackgroundColor3 = Config.Colors.ult,
-		BackgroundTransparency = 0.88,
-		BorderSizePixel = 0,
-	}, ultReadyOverlay)
-	new("UIGradient", {
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0),
-			NumberSequenceKeypoint.new(0.35, 1),
-			NumberSequenceKeypoint.new(0.65, 1),
-			NumberSequenceKeypoint.new(1, 0),
-		}),
-		Rotation = 90,
-	}, edge)
+
+	return true
 end
 
 -- ---------------------------------------------------------------------------
 -- Обновление
 -- ---------------------------------------------------------------------------
-local shownHp = 1
-local chipHp = 1
-local shownEn = 1
-local shownUlt = 0
 local comboScale = 1
-local hitmarkerScale = 1
-local hitTime = 0
+local hitUntil = 0
+local hitScale = 1
 local bannerUntil = 0
-local helpVisible = true
+local bannerLen = 1
 
-function Hud.setHelpVisible(v)
-	helpVisible = v
-	if helpBox then
-		helpBox.Visible = v
+function Hud.setDiag(text)
+	if diagLabel then
+		diagLabel.Text = text or ""
+	end
+end
+
+function Hud.toggleDiag()
+	if diagLabel then
+		diagLabel.Visible = not diagLabel.Visible
 	end
 end
 
 function Hud.toggleHelp()
-	Hud.setHelpVisible(not helpVisible)
-	return helpVisible
+	if helpBox then
+		helpBox.Visible = not helpBox.Visible
+	end
+end
+
+function Hud.setHelpVisible(v)
+	if helpBox then
+		helpBox.Visible = v and true or false
+	end
 end
 
 function Hud.announce(text, sub, color, time, scale)
-	if not gui then
+	if not banner then
 		return
 	end
-	banner.Text = text
-	banner.TextColor3 = color or C.ultHot
-	bannerSub.Text = sub or ""
-	banner.Visible = true
-	bannerSub.Visible = true
+	banner.Text = text or ""
+	banner.TextColor3 = color or Color3.fromRGB(255, 255, 255)
+	banner.TextSize = math.floor(40 * (scale or 1))
 	banner.TextTransparency = 0
+	banner.Visible = true
+	bannerSub.Text = sub or ""
 	bannerSub.TextTransparency = 0
-	banner.Size = UDim2.new(0, 700 * (scale or 1), 0, 46 * (scale or 1))
-	bannerUntil = os.clock() + (time or 2.4)
-	local a = TweenService:Create(banner, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-		Size = UDim2.new(0, 700 * (scale or 1), 0, 46 * (scale or 1)),
-	})
-	a:Play()
+	bannerSub.Visible = (sub ~= nil and sub ~= "")
+	bannerUntil = os.clock() + (time or 2)
+	bannerLen = time or 2
 end
 
 function Hud.hitmarker(crit, kill)
-	if not gui then
+	if not hitmarker then
 		return
 	end
 	hitmarker.Visible = true
-	hitTime = os.clock()
-	hitmarkerScale = crit and 1.5 or 1
-	if kill then
-		hitmarkerScale = hitmarkerScale + 0.4
-	end
-	local col = crit and Color3.fromRGB(255, 220, 90) or Color3.fromRGB(255, 255, 255)
+	hitUntil = os.clock() + 0.2
+	hitScale = crit and 1.5 or 1
+	local col = kill and Color3.fromRGB(255, 120, 120) or (crit and C.ultHot or Color3.fromRGB(255, 255, 255))
 	for _, line in ipairs(hitmarker:GetChildren()) do
 		if line:IsA("Frame") then
 			line.BackgroundColor3 = col
@@ -650,24 +471,24 @@ function Hud.hitmarker(crit, kill)
 end
 
 function Hud.combo(streak)
-	if not gui then
+	if not comboBox then
 		return
 	end
-	comboBox.Visible = true
-	comboText.Text = tostring(streak) .. "×"
-	comboText.TextColor3 = (streak >= 8 and C.ult) or (streak >= 5 and C.ultHot) or Color3.fromRGB(255, 235, 150)
-	comboScale = 1.35
-	comboBox.Size = UDim2.new(0, 220 * comboScale, 0, 74 * comboScale)
+	if streak and streak > 1 then
+		comboBox.Visible = true
+		comboText.Text = tostring(streak)
+		comboScale = 1.6
+	end
 end
 
-function Hud.setCharge(show, frac, label)
-	if not gui then
+function Hud.setCharge(show, frac, text)
+	if not chargeBox then
 		return
 	end
-	chargeBar.Visible = show and true or false
+	chargeBox.Visible = show and true or false
 	if show then
-		chargeFill.Size = UDim2.new(math.clamp(frac or 0, 0, 1), 0, 1, 0)
-		chargeLabel.Text = label or ("ЗАРЯД " .. math.floor((frac or 0) * 100) .. "%")
+		fracFill(chargeFill, frac)
+		chargeText.Text = text or ""
 	end
 end
 
@@ -676,117 +497,122 @@ function Hud.update(dt, state)
 		return
 	end
 	state = state or {}
-	local maxHp = state.maxHealth or 100
-	local hp = math.clamp((state.health or 0) / math.max(maxHp, 1), 0, 1)
-	local en = math.clamp((state.energy or 0) / (state.maxEnergy or 100), 0, 1)
-	local ult = math.clamp((state.ult or 0) / (state.maxUlt or 100), 0, 1)
+	local now = os.clock()
 
-	-- полосы
-	shownHp = shownHp + (hp - shownHp) * math.min(dt * 14, 1)
-	chipHp = chipHp + (hp - chipHp) * math.min(dt * 2.5, 1)
-	if chipHp < shownHp then
-		chipHp = shownHp
+	-- жизнь
+	local hpf = 0
+	if (state.maxHealth or 0) > 0 then
+		hpf = math.clamp((state.health or 0) / state.maxHealth, 0, 1)
 	end
-	shownEn = shownEn + (en - shownEn) * math.min(dt * 12, 1)
-	shownUlt = shownUlt + (ult - shownUlt) * math.min(dt * 10, 1)
-
-	barHp.Size = UDim2.new(shownHp, 0, 1, 0)
-	barHpChip.Size = UDim2.new(chipHp, 0, 1, 0)
-	txtHp.Text = number(state.health or 0) .. " / " .. number(maxHp)
-	barEn.Size = UDim2.new(shownEn, 0, 1, 0)
-	barEnTxt.Text = ""
-	barUlt.Size = UDim2.new(shownUlt, 0, 1, 0)
-	local full = ult >= 0.999
-	barUltTxt.Text = full and "УЛЬТА ГОТОВА — ЖМИ  X !" or ("УЛЬТА «ОБЛИТЕРАЦИЯ» — " .. math.floor(ult * 100) .. "%")
-	barUltTxt.TextColor3 = full and Color3.fromRGB(30, 10, 30) or Color3.fromRGB(255, 255, 255)
-	ultStroke.Color = full and C.ultHot or C.ult
-	ultStroke.Transparency = full and (0.1 + 0.25 * math.abs(math.sin(os.clock() * 6))) or 0.4
-	ultReadyOverlay.Visible = full and not state.ultActive or false
-	if ultReadyOverlay.Visible then
-		ultReadyOverlay:FindFirstChildWhichIsA("Frame").BackgroundTransparency = 0.9 - 0.06 * math.abs(math.sin(os.clock() * 5))
+	fracFill(barHp, hpf)
+	txtHp.Text = number(state.health or 0) .. " / " .. number(state.maxHealth or 0)
+	if hpf < 0.35 then
+		txtHp.TextColor3 = Color3.fromRGB(255, 200, 200)
+	else
+		txtHp.TextColor3 = Color3.fromRGB(255, 255, 255)
 	end
 
-	-- откаты
-	for name, data in pairs(state.cooldowns or {}) do
-		local slot = abilitySlots[name]
-		if slot then
-			local frac = math.clamp(data.frac or 0, 0, 1)
-			slot.overlay.Size = UDim2.new(1, 0, frac, 0)
-			slot.overlay.BackgroundTransparency = 0.4
-			slot.overlay.Visible = frac > 0.01
-			slot.stroke.Color = (frac > 0.01) and Color3.fromRGB(90, 90, 110) or slot.color
-		end
-	end
-	-- способность с недостатком энергии подсвечиваем тускло
-	local ultSlot = abilitySlots["ult"]
-	if ultSlot then
-		ultSlot.overlay.Visible = not full
-		ultSlot.overlay.Size = UDim2.new(1, 0, 1 - ult, 0)
-		ultSlot.overlay.BackgroundTransparency = 0.55
-		ultSlot.stroke.Color = full and C.ultHot or slotColor(ultSlot)
-	end
+	-- энергия
+	fracFill(barEn, (state.energy or 0) / math.max(state.maxEnergy or 100, 1))
 
-	-- маркер попадания
-	if hitmarker.Visible then
-		local age = os.clock() - hitTime
-		if age > 0.22 then
-			hitmarker.Visible = false
-		else
-			local s = 1 + (1 - age / 0.22) * 0.5 * (hitmarkerScale or 1)
-			hitmarker.Size = UDim2.new(0, 44 * s, 0, 44 * s)
-			for _, line in ipairs(hitmarker:GetChildren()) do
-				if line:IsA("Frame") then
-					line.BackgroundTransparency = math.clamp(age / 0.22, 0, 1)
-				end
+	-- ульта
+	local ultF = math.clamp((state.ult or 0) / math.max(state.maxUlt or 100, 1), 0, 1)
+	fracFill(barUlt, ultF)
+	txtUlt.Text = "УЛЬТА " .. math.floor(ultF * 100) .. "%"
+	local full = ultF >= 0.999
+	if ultStroke then
+		ultStroke.Color = full and C.ultHot or C.ult
+		ultStroke.Thickness = full and (2.4 + 0.6 * math.sin(now * 6)) or 1.5
+	end
+	if full and not ultWasFull then
+		Hud.announce("УЛЬТА ГОТОВА", "нажми X", C.ultHot, 1.6, 0.9)
+	end
+	ultWasFull = full
+
+	-- способности
+	local cds = state.cooldowns or {}
+	for id, view in pairs(slotViews) do
+		local def = Config.Abilities[id]
+		local c = cds[id]
+		local left = 0
+		if c then
+			if c.left then
+				left = c.left
+			elseif c.endT then
+				left = math.max(0, c.endT - now)
 			end
 		end
+		local total = (c and c.total) or (def and def.cooldown) or 1
+		local cdFrac = (total > 0) and math.clamp(left / total, 0, 1) or 0
+		local charged = true
+		if id == "ult" then
+			cdFrac = 1 - ultF
+			charged = full
+		elseif def and def.energy > 0 then
+			charged = (state.energy or 0) >= def.energy
+		end
+		if view.fill.Parent then
+			view.fill.Size = UDim2.new(1, 0, cdFrac, 0)
+		end
+		view.slot.BackgroundTransparency = charged and 0.15 or 0.45
+		view.stroke.Color = charged and view.color or Color3.fromRGB(90, 95, 110)
+		if left > 0.1 and not (id == "ult") then
+			view.cd.Visible = true
+			view.cd.Text = string.format("%.1f", left)
+			view.name.Visible = false
+		else
+			view.cd.Visible = false
+			view.name.Visible = true
+		end
+	end
+
+	-- статистика
+	statLine.Text = "УРОН " .. number(state.totalDamage or 0)
+		.. "   ·   DPS " .. number(state.dps or 0)
+		.. "   ·   МАКС " .. number(state.maxHit or 0)
+
+	-- полёт
+	if state.flying then
+		flyTag.Text = "ПОЛЁТ  " .. number(state.speed or 0) .. "  ст/с" .. ((state.boost or 0) > 0.3 and "  ·  БУСТ" or "")
+	else
+		flyTag.Text = ""
 	end
 
 	-- комбо
 	if comboBox.Visible then
-		comboScale = comboScale + (1 - comboScale) * math.min(dt * 8, 1)
-		comboBox.Size = UDim2.new(0, 220 * comboScale, 0, 74 * comboScale)
+		comboScale = comboScale + (1 - comboScale) * math.min(dt * 9, 1)
+		comboBox.Size = UDim2.new(0, 150 * comboScale, 0, 48 * comboScale)
 		if (state.comboTimer or 0) <= 0 then
 			comboBox.Visible = false
 		end
 	end
 
-	-- статистика
-	statDamage.Text = number(state.totalDamage or 0)
-	statDps.Text = number(state.dps or 0)
-	statMax.Text = number(state.maxHit or 0)
-	statKo.Text = number(state.kos or 0)
-
-	-- табло
-	local board = state.topBoard
-	if board then
-		for i, row in ipairs(topRows) do
-			local entry = board[i]
-			if entry then
-				row.Text = i .. ". " .. entry.name .. "   " .. number(entry.damage)
-				row.TextColor3 = (i == 1) and C.ultHot or Color3.fromRGB(230, 235, 245)
-			else
-				row.Text = i .. ". —"
+	-- маркер попадания
+	if hitmarker.Visible then
+		local age = now - (hitUntil - 0.2)
+		if age > 0.2 then
+			hitmarker.Visible = false
+		else
+			local k = 1 - age / 0.2
+			hitmarker.Size = UDim2.new(0, 40 * hitScale * (1 + k * 0.4), 0, 40 * hitScale * (1 + k * 0.4))
+			for _, line in ipairs(hitmarker:GetChildren()) do
+				if line:IsA("Frame") then
+					line.BackgroundTransparency = 1 - k
+				end
 			end
 		end
 	end
 
-	-- полёт
-	local flying = state.flying
-	flyBox.Visible = flying and true or false
-	if flying then
-		flyText.Text = string.format("ПОЛЁТ  %d  стад/с%s", math.floor(state.speed or 0), state.boost and "  ⚡БУСТ" or "")
-	end
-
 	-- баннер
 	if banner.Visible then
-		local left = bannerUntil - os.clock()
+		local left = bannerUntil - now
 		if left <= 0 then
 			banner.Visible = false
 			bannerSub.Visible = false
-		elseif left < 0.5 then
-			banner.TextTransparency = 1 - left / 0.5
-			bannerSub.TextTransparency = 1 - left / 0.5
+		elseif left < 0.4 then
+			local t = left / 0.4
+			banner.TextTransparency = 1 - t
+			bannerSub.TextTransparency = 1 - t
 		end
 	end
 end
