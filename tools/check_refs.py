@@ -130,6 +130,19 @@ def extra_checks():
         problems += 1
         print("fx-СОБЫТИЕ БЕЗ ОБРАБОТЧИКА: %s" % name)
 
+    # 2.5) запрет присваивания дочерних имён инстансу (remotes.Attack = ... падает)
+    remote_names = {"Attack", "Action", "Feedback", "Hurt", "Ult", "Sfx", "Ack", "Knock"}
+    inst_vars = {"remotes", "remote", "folder", "gui"}
+    for f, src in CODE.items():
+        for m in re.finditer(r'\b(\w+)\s*\.\s*(\w+)\s*=(?!=)', src):
+            var, field = m.group(1), m.group(2)
+            if var in inst_vars and (var == "remotes" or field in remote_names):
+                line = src[:m.start()].count("\n") + 1
+                problems += 1
+                print("ПРИСВАИВАНИЕ ПОЛЯ ИНСТАНСУ: %s:%d — %s.%s = ... "
+                      "(полям инстанса нельзя присваивать чужие имена, только таблица)"
+                      % (f, line, var, field))
+
     # 3) remote'ы: список в генераторе == используемые в Lua
     gen = open(os.path.join(os.path.dirname(LUA), "generate_epic_combat.py"), encoding="utf-8").read()
     m = re.search(r'for rname in \(([^)]*)\)', gen)

@@ -786,10 +786,13 @@ local function collectRows()
 end
 
 local function updateScoreboard()
-	local gui
-	local board = workspace:FindFirstChild("Scoreboard", true)
-	if board then
-		gui = board:FindFirstChildOfClass("SurfaceGui") or board:FindFirstChildOfClass("BillboardGui")
+	local gui = workspace:FindFirstChild("BoardGui", true)
+	if not gui then
+		local board = workspace:FindFirstChild("Scoreboard", true)
+		if board then
+			gui = board:FindFirstChildOfClass("SurfaceGui", true)
+				or board:FindFirstChildOfClass("BillboardGui", true)
+		end
 	end
 	if not gui then
 		return

@@ -54,13 +54,12 @@ local function corner(inst, r)
 end
 
 local function stroke(inst, color, thickness, transparency)
-	new("UIStroke", {
+	return new("UIStroke", {
 		Color = color or Color3.fromRGB(0, 0, 0),
 		Thickness = thickness or 1.5,
 		Transparency = transparency or 0.3,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 	}, inst)
-	return inst
 end
 
 local function frame(props, parent)
@@ -151,7 +150,6 @@ function Hud.init()
 	local enHolder
 	enHolder, barEn = bar("En", 26, 8, C.energy, Color3.fromRGB(160, 255, 240), 4)
 
-	ultStroke = nil
 	local ultHolder
 	ultHolder, barUlt = bar("Ult", 40, 13, C.ult, C.ultHot, 6)
 	ultStroke = ultHolder:FindFirstChildOfClass("UIStroke")

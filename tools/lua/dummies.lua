@@ -9,7 +9,7 @@
 
 local Players = game:GetService("Players")
 
-local RS = script.Parent
+local RS = game:GetService("ReplicatedStorage")
 local Config = require(RS:WaitForChild("CombatConfig"))
 
 local Dummies = {}

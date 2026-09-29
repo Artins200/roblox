@@ -140,6 +140,9 @@ end
 -- ---------------------------------------------------------------------------
 
 local function findJoint(character, names)
+	if names == nil then
+		return nil
+	end
 	if type(names) == "string" then
 		names = { names }
 	end

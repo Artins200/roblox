@@ -40,7 +40,9 @@ local State = {
 }
 Input.state = State
 
-local remotes
+-- ссылки на remote-объекты: обычная Lua-таблица (в Instance нельзя присваивать
+-- несуществующие поля: remotes.Attack = ... падает с ошибкой)
+local R = {}
 local character, humanoid, root, anim
 local comboIndex = 0
 local comboT = 0
@@ -136,8 +138,8 @@ local function canUse(id)
 end
 
 local function fire(action, data)
-	if remotes then
-		remotes.Attack:FireServer(action, data or {})
+	if R.Attack then
+		R.Attack:FireServer(action, data or {})
 	end
 end
 
@@ -503,31 +505,28 @@ end
 -- Серверные события
 -- ---------------------------------------------------------------------------
 local function setupRemotes()
-	remotes = RS:WaitForChild("CombatRemotes", 10)
-	if not remotes then
-		warn("[EPIC COMBAT] не нашёл CombatRemotes в ReplicatedStorage")
+	local folder = RS:WaitForChild("CombatRemotes", 10)
+	if not folder then
+		warn("[EPIC COMBAT] в ReplicatedStorage нет папки CombatRemotes")
 		return
 	end
-	local attack = remotes:WaitForChild("Attack", 10)
-	local action = remotes:WaitForChild("Action", 10)
-	local feedback = remotes:WaitForChild("Feedback", 10)
-	local hurt = remotes:WaitForChild("Hurt", 10)
-	local ult = remotes:WaitForChild("Ult", 10)
-	local sfx = remotes:WaitForChild("Sfx", 10)
-	local ack = remotes:WaitForChild("Ack", 10)
-	if not (attack and action and feedback and hurt and ult and sfx and ack) then
-		warn("[EPIC COMBAT] не все remote-объекты на месте")
+	local names = { "Attack", "Action", "Feedback", "Hurt", "Ult", "Sfx", "Ack" }
+	local missing = {}
+	for i = 1, #names do
+		local name = names[i]
+		local obj = folder:WaitForChild(name, 10)
+		if obj then
+			R[name] = obj
+		else
+			missing[#missing + 1] = name
+		end
+	end
+	if #missing > 0 then
+		warn("[EPIC COMBAT] не пришли remote-объекты: " .. table.concat(missing, ", "))
 		return
 	end
-	remotes.Attack = attack
-	remotes.Action = action
-	remotes.Feedback = feedback
-	remotes.Hurt = hurt
-	remotes.Ult = ult
-	remotes.Sfx = sfx
-	remotes.Ack = ack
 
-	action.OnClientEvent:Connect(function(target, name, data)
+	R.Action.OnClientEvent:Connect(function(target, name, data)
 		safe("событие " .. tostring(name), function()
 			if not target or not target.Parent then
 				return
@@ -566,7 +565,7 @@ local function setupRemotes()
 		end)
 	end)
 
-	feedback.OnClientEvent:Connect(function(info)
+	R.Feedback.OnClientEvent:Connect(function(info)
 		safe("отклик", function()
 			info = info or {}
 			if info.kind == "hit" then
@@ -593,11 +592,11 @@ local function setupRemotes()
 		end)
 	end)
 
-	hurt.OnClientEvent:Connect(function(info)
+	R.Hurt.OnClientEvent:Connect(function(info)
 		safe("урон", function()
 			info = info or {}
 			if info.kind == "fall" then
-				Hud.announce("ВОЗВРАТ НА АРЕНУ", "не улетай слишком далеко", Config.Colors.plasma, 1.6, 0.8)
+				Hud.announce("ВОЗВРАТ НА ПОЛИГОН", "не улетай слишком далеко", Config.Colors.plasma, 1.6, 0.8)
 				return
 			end
 			Camera.flash(Config.Colors.danger, 0.35, 0.4)
@@ -612,7 +611,7 @@ local function setupRemotes()
 		end)
 	end)
 
-	ult.OnClientEvent:Connect(function(info)
+	R.Ult.OnClientEvent:Connect(function(info)
 		safe("ульта", function()
 			info = info or {}
 			local caster = info.caster
@@ -620,7 +619,7 @@ local function setupRemotes()
 			local a = caster and Animator.get(caster)
 			if info.phase == "charge" then
 				if isMe then
-					Hud.announce("ОБЛИТЕРАЦИЯ", "заряжаю ульту — не подходи", Config.Colors.ult, 1.2, 0.9)
+					Hud.announce("ОБЛИТЕРАЦИЯ", "заряжаю ульту", Config.Colors.ult, 1.2, 0.9)
 				else
 					Hud.announce("УЛЬТА ВРАГА", (caster and caster.Name or "") .. " заряжает удар", Config.Colors.danger, 1.6, 0.8)
 				end
@@ -648,13 +647,13 @@ local function setupRemotes()
 		end)
 	end)
 
-	sfx.OnClientEvent:Connect(function(name, position, vol, pitch)
+	R.Sfx.OnClientEvent:Connect(function(name, position, vol, pitch)
 		safe("звук", function()
 			Animator.playSound(name, position, vol, pitch)
 		end)
 	end)
 
-	ack.OnClientEvent:Connect(function(kind, info)
+	R.Ack.OnClientEvent:Connect(function(kind, info)
 		safe("ack", function()
 			lastAck = os.clock()
 			info = info or {}
@@ -671,7 +670,6 @@ local function setupRemotes()
 			end
 		end)
 	end)
-
 end
 
 -- ---------------------------------------------------------------------------

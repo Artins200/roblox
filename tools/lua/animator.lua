@@ -550,33 +550,56 @@ local BREATH = {
 function Anim:locomotion(dt, speed, grounded, vel)
 	local L = Actions.LOCO
 	local pose = Pose.copy(Actions.STANCE)
-	local walkSpeed = math.max(self.humanoid.WalkSpeed or 16, 1)
-	local run = math.clamp((speed - walkSpeed * 0.9) / (walkSpeed * 0.6), 0, 1)
+	-- опорная скорость — обычная ходьба; всё, что быстрее, даёт «бег»
+	local ref = Config.Fighter.walkSpeed or 16
+	local run = math.clamp((speed - ref * 0.95) / (ref * 0.75), 0, 1)
 
 	if grounded then
 		if speed > 0.7 then
-			self.state.phase = (self.state.phase or 0) + speed * dt * 0.3
+			-- частота шага растёт со скоростью, на бегу — заметно быстрее
+			self.state.phase = (self.state.phase or 0) + speed * dt * (0.30 + run * 0.26)
 		end
+		local cycle = math.sin(self.state.phase)
+		local cycle2 = math.cos(self.state.phase)
+		local k = math.clamp(speed / ref, 0, 1.5)
 		local amp = math.rad(L.walkAmp + (L.runAmp - L.walkAmp) * run)
 		local armsAmp = math.rad(L.walkArms + (L.runArms - L.walkArms) * run)
-		local s = math.sin(self.state.phase)
-		local c = math.cos(self.state.phase)
-		local k = math.clamp(speed / walkSpeed, 0, 1.35)
-		pose.ll.p = pose.ll.p + amp * s * k
-		pose.rl.p = pose.rl.p - amp * s * k
-		pose.ll.bend = (pose.ll.bend or 0) - math.rad(30) * math.max(0, -s) * k
-		pose.rl.bend = (pose.rl.bend or 0) - math.rad(30) * math.max(0, s) * k
-		pose.la.p = pose.la.p - armsAmp * s * k
-		pose.ra.p = pose.ra.p + armsAmp * s * k
-		pose.la.r = pose.la.r - math.rad(6) * k
-		pose.ra.r = pose.ra.r + math.rad(6) * k
-		pose.la.bend = (pose.la.bend or 0) + math.rad(18) * k
-		pose.ra.bend = (pose.ra.bend or 0) + math.rad(18) * k
-		pose.body.y = pose.body.y - math.rad(L.sway) * s * (0.35 + run * 0.6)
-		pose.body.r = pose.body.r + math.rad(L.sway * 0.35) * c * (0.4 + run * 0.6)
-		pose.body.p = pose.body.p + math.rad(L.runLean * 0.55) * run * k
-		pose.neck.p = pose.neck.p - math.rad(L.runLean * 0.5) * run * k
-		pose.bob = pose.bob - L.bobAmp * math.abs(c) * k * (0.55 + run * 0.5)
+
+		-- ноги: шаг и подгиб колена на подъёме (для R15)
+		pose.ll.p = pose.ll.p + amp * cycle * k
+		pose.rl.p = pose.rl.p - amp * cycle * k
+		local knee = math.rad(36 + 30 * run)
+		pose.ll.bend = (pose.ll.bend or 0) - knee * math.max(0, -cycle) * k
+		pose.rl.bend = (pose.rl.bend or 0) - knee * math.max(0, cycle) * k
+		pose.ll.r = pose.ll.r - math.rad(3) * k
+		pose.rl.r = pose.rl.r + math.rad(3) * k
+
+		-- руки: в противофазе ногам, на бегу локти согнуты
+		local armBend = math.rad(16 + 78 * run)
+		pose.la.p = pose.la.p - armsAmp * cycle * k
+		pose.ra.p = pose.ra.p + armsAmp * cycle * k
+		pose.la.bend = (pose.la.bend or 0) + armBend
+		pose.ra.bend = (pose.ra.bend or 0) + armBend
+		pose.la.r = pose.la.r - math.rad(4 + 12 * run) * k
+		pose.ra.r = pose.ra.r + math.rad(4 + 12 * run) * k
+
+		-- корпус: наклон вперёд, качание, скрутка и подпрыгивание
+		pose.body.p = pose.body.p + math.rad(L.runLean * (0.45 + run)) * run * k + math.rad(4) * run
+		pose.body.y = pose.body.y - math.rad(L.sway) * cycle * (0.4 + run * 0.7)
+		pose.body.r = pose.body.r + math.rad(L.sway * 0.4) * cycle2 * (0.4 + run * 0.7)
+		pose.neck.p = pose.neck.p - math.rad(L.runLean * 0.6) * run * k
+		pose.bob = pose.bob - (L.bobAmp + 0.05 * run) * math.abs(cycle) * k * (0.6 + run * 0.6)
+
+		-- звук шагов (на бегу — чаще и тяжелее)
+		local step = math.floor(self.state.phase / math.pi)
+		if step ~= self.state.step then
+			local first = (self.state.step ~= nil)
+			self.state.step = step
+			if first and speed > 5 and self.root then
+				playSound("land", self.root.Position, 0.12 + run * 0.18, 1.45 + run * 0.25)
+			end
+		end
+
 		return pose
 	end
 
