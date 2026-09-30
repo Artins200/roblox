@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# Дампы извлечения rbxl (генерируются tools/rbxl_extract.py)
+.work/chunks/
+.work/*.bin
+.work/strings.txt
