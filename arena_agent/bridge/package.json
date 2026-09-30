@@ -1,0 +1,15 @@
+{
+  "name": "arena-roblox-bridge",
+  "version": "1.0.0",
+  "description": "Локальный мост между Roblox Studio (плагин ArenaAgent) и LLM-провайдерами. Ноль зависимостей.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test-client.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

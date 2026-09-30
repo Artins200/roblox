@@ -211,3 +211,13 @@ ServerScriptService сервер ждал конфиг вечно и «ниче�
 
 * `epic_combat.rbxlx` — эта игра (4 атаки + полёт).
 * Прошлые версии (Build A Boat, первая боёвка) остались в истории git.
+
+---
+
+## Ещё в репозитории
+
+* **[`arena_agent/`](arena_agent/README.md)** — плагин **Arena Agent** для Roblox
+  Studio: чат с ИИ-агентом прямо в редакторе, который сам генерирует скрипты,
+  объекты и свойства в открытом месте. Провайдеры: OpenRouter / OpenAI /
+  Anthropic / Ollama / LM Studio / локальный bridge (слот под нативный API
+  arena.ai уже готов).

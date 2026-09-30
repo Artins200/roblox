@@ -1,0 +1,17 @@
+{
+  "_comment": "Скопируйте в config.json и заполните. Всё то же можно задать через переменные окружения (OPENAI_API_KEY, ANTHROPIC_API_KEY, ARENA_API_KEY, ...).",
+  "provider": "openrouter",
+  "endpoint": "",
+  "apiKey": "ВСТАВЬТЕ_КЛЮЧ",
+  "model": "",
+  "port": 8787,
+  "host": "127.0.0.1",
+  "timeoutMs": 240000,
+
+  "_about_providers": {
+    "openrouter": "endpoint: https://openrouter.ai/api/v1 — модели вида anthropic/claude-sonnet-4.5, openai/gpt-4.1-mini, deepseek/deepseek-chat-v3.1 (модель можно оставить пустой и выбрать в Studio)",
+    "openai": "endpoint: https://api.openai.com/v1 — модели вида gpt-4.1-mini",
+    "anthropic": "endpoint: https://api.anthropic.com/v1 — модели вида claude-sonnet-4-5",
+    "arena": "заготовка под будущий публичный API arena.ai — впишите актуальный endpoint, когда он появится; формат запроса OpenAI-совместимый"
+  }
+}
